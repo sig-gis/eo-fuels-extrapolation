@@ -339,6 +339,32 @@ def run_metrics(year, do_plot=False):
 
     print("[METRICS] Plotting complete")
 
+def download_tile_from_gcs(tilenum):
+    client = storage.Client()
+    bucket = client.bucket(BUCKET_NAME)
+
+    tile_prefix = f"{tilenum}/"
+    tile_dir = TEMP_ROOT / tilenum
+    tile_dir.mkdir(parents=True, exist_ok=True)
+
+    blobs = list(bucket.list_blobs(prefix=tile_prefix))
+
+    if not blobs:
+        raise FileNotFoundError(
+            f"No blobs found for tile {tilenum} in gs://{BUCKET_NAME}/{tile_prefix}"
+        )
+
+    for blob in blobs:
+        if blob.name.endswith("/"):
+            continue
+
+        local_path = tile_dir / Path(blob.name).name
+        if not local_path.exists():
+            print(f"Downloading {blob.name}")
+            blob.download_to_filename(local_path)
+
+    return tile_dir
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run full FM40 RF → fire behavior → evaluation pipeline"
@@ -366,6 +392,7 @@ def main():
     model = load_rf_model()
 
     for tilenum in args.tilenums:
+        download_tile_from_gcs(tilenum)
         run_rf_inference(model, tilenum, args.year)
         run_fire_behavior(tilenum, args.year)
 
