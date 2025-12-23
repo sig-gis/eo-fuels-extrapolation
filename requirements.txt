@@ -1,0 +1,11 @@
+numpy==1.26.4
+pandas==2.3.3
+joblib==1.5.2
+scikit-learn==1.6.1
+rasterio==1.3.11
+geopandas
+plotly
+earthengine-api
+geemap
+google-cloud-storage
+pyretechnics
