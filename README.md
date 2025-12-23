@@ -77,12 +77,15 @@ conda install numpy==1.26.4
 
 # Main Pyretechnics Workflow
 This workflow can be completed in two steps. First step, run the `export_embeddings_tiles.py` file, with a list of tiles, to export to the necessary files from Earth Engine.
+
 Example: 
 ```
 python export_embeddings_tiles.py --tilenums 01180 00371
 ```
 
 Second step, run the `pyro_pipeline.py` file, with a list of tiles, to complete the analysis and get the final behavior metrics and divergence stats. 
+
+Example:
 ```
 python pyro_pipeline.py --tilenums 01180 00371
 ```
