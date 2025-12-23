@@ -66,11 +66,11 @@ Follow these steps to set up your environment and install the required Python pa
 2. Open your terminal, run `conda --version` to ensure Anaconda is installed properly. 
 3. Create a fresh conda environment with python installed: `conda create -n your-env-name python=3.10.19`.
 4. Activate your new environment: `conda activate your-env-name`.
-4. Make sure the `requirements.txt` file is in the current directory, then run: 
+5. Make sure the `requirements.txt` file is in the current directory, then run: 
 ```
 pip install -r requirement.txt
 ```
-5. The `requirements.txt` file installs `numpy==1.24.4`. We actually need `numpy==1.26.4`, however, `pyretechnics==2025.5.15` can't be installed with `numpy==1.26.4` so we'll upgrade `numpy==1.24.4` to `numpy==1.26.4` after installing the packages with the `requirements.txt` file.
+6. The `requirements.txt` file installs `numpy==1.24.4`. We actually need `numpy==1.26.4`, however, `pyretechnics==2025.5.15` can't be installed with `numpy==1.26.4` so we'll upgrade `numpy==1.24.4` to `numpy==1.26.4` after installing the packages with the `requirements.txt` file.
 ```
 conda install numpy==1.26.4 
 ```
