@@ -11,9 +11,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 import xgboost as xgb
 
-root_file = './data/FuelsTable/'
-dist_file = './data/fuel_class_distributions_2023.csv'
-dist_frame = pd.read_csv(dist_file)
+root_file = r'data\samples'
+dist_file = r'data\samples\fuel_class_distributions_2023.csv'
+dist_frame = pd.read_csv(dist_file, index_col=0)
 
 sample_pyromes= [
     29
@@ -23,9 +23,9 @@ eval_pyromes = [
 ]
 
 single_pyrome_tests = [
-    6,
-    18,
-    26,
+    # 6,
+    # 18,
+    # 26,
     27,
     28,
     29,
@@ -35,23 +35,23 @@ single_pyrome_tests = [
     33,
     34,
     35,
-    36,
+    # 36,
     41
 ]
 
 selected_pair_neighbor_zones = [
-    18,
-    26,
+    # 18,
+    # 26,
     27,
     28,
-    26,
+    # 26,
     30,
     31,
     34,
     31,
     34,
     35,
-    36,
+    # 36,
     35,
     34
 ]
@@ -92,7 +92,7 @@ def load_data(pyromes,years):
     yearly_frames = []
     for pyrome in pyromes:
         for year in years:
-            year_csv_file = root_file + f'stratified_sample_fbfm40_30m_{pyrome}_{year}.csv'
+            year_csv_file = root_file + f'/stratified_sample_fbfm40_30m_{pyrome}_{year}.csv'
             year_fuels_sample = pd.read_csv(year_csv_file)
             yearly_frames.append(year_fuels_sample)
 
@@ -110,12 +110,20 @@ alphaearth_features = [f'A{str(i).zfill(2)}' for i in range(64)]
 label_list = ['FBFM40','FBFM40Parent']
 feature_list_wo_alphaearth = [feature for feature in feature_list if feature not in (alphaearth_features +label_list)]
 
-def find_closest_zone(zone,all_zones,zone_dists):
+# def find_closest_zone(zone,all_zones,zone_dists):
+#     dists = {}
+#     for pair_zone in [pair for pair in all_zones if pair != zone]:
+#         dist = np.sqrt(np.sum((zone_dists[zone_dists['zone'] == zone][['1','2','3','4','5','6','7']].to_numpy() - zone_dists[zone_dists['zone'] == pair_zone][['1','2','3','4','5','6','7']].to_numpy())**2))
+#         dists[pair_zone] = dist
+#     neighbor = min(dists,key=dists.get)
+#     return neighbor
+
+def find_closest_zone(zone, all_zones, zone_dists):
     dists = {}
     for pair_zone in [pair for pair in all_zones if pair != zone]:
-        dist = np.sqrt(np.sum((zone_dists[zone_dists['zone'] == zone][['1','2','3','4','5','6','7']].to_numpy() - zone_dists[zone_dists['zone'] == pair_zone][['1','2','3','4','5','6','7']].to_numpy())**2))
+        dist = np.sqrt(np.sum((zone_dists.loc[zone][['1','2','3','4','5','6','7']].to_numpy() - zone_dists.loc[pair_zone][['1','2','3','4','5','6','7']].to_numpy())**2))
         dists[pair_zone] = dist
-    neighbor = min(dists,key=dists.get)
+    neighbor = min(dists, key=dists.get)
     return neighbor
 
 def train_and_eval_pyrome(zone,selected_pair_zone,all_zones,zone_class_dists,years,model,seed,features,labels,class_list,test_size=0.25):
@@ -213,4 +221,4 @@ for model_name, model in zip(['RandomForest'],[rf]):
         performance_metrics.append(performance_metrics_sample)
 
 performance_df = pd.DataFrame(performance_metrics)
-performance_df.to_csv('./data/performance_metrics_wo_alphaearth.csv',index=False)
+performance_df.to_csv(r'data/performance_metrics_wo_alphaearth.csv',index=False)

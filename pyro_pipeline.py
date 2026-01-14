@@ -32,7 +32,8 @@ TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 BUCKET_NAME = "geoai-fuels-tiles"
-MODEL_BLOB = "utils/rfmodel_conus_1000ptsperclass_150trees.joblib"
+# MODEL_BLOB = "utils/rfmodel_conus_1000ptsperclass_150trees.joblib"
+MODEL_BLOB = "utils/rf_zone_27.joblib"
 
 def load_rf_model():
     local_model = TEMP_ROOT / MODEL_BLOB
@@ -53,22 +54,82 @@ def load_rf_model():
     print("Loaded RF model:", type(model))
     return model
 
+# def run_rf_inference(model, tilenum, year):
+#     tile_dir = TEMP_ROOT / tilenum
+#     aef_tile = next(tile_dir.glob("*aef*.tif"))
+
+#     with rasterio.open(aef_tile) as src:
+#         aef = src.read()
+#         profile = src.profile
+
+#     bands, h, w = aef.shape
+#     data = np.transpose(aef, (1, 2, 0)).reshape(-1, bands)
+#     preds = model.predict(data).reshape(h, w)
+
+#     out_dir = OUTPUT_ROOT / tilenum
+#     out_dir.mkdir(parents=True, exist_ok=True)
+
+#     out_path = out_dir / f"tilenum{tilenum}_aef_{year}_pred.tif"
+
+#     profile.update(count=1, dtype="uint8", compress="lzw")
+
+#     with rasterio.open(out_path, "w", **profile) as dst:
+#         dst.write(preds, 1)
+
+#     print(f"[RF] Wrote {out_path}")
+
 def run_rf_inference(model, tilenum, year):
     tile_dir = TEMP_ROOT / tilenum
-    aef_tile = next(tile_dir.glob("*aef*.tif"))
+    tif_files = [f for f in tile_dir.glob("*.tif") if "label" not in f.name]
 
-    with rasterio.open(aef_tile) as src:
-        aef = src.read()
-        profile = src.profile
+    print(f"Model expects {model.n_features_in_} features")
+    print(f"Feature names: {model.feature_names_in_}")
 
-    bands, h, w = aef.shape
-    data = np.transpose(aef, (1, 2, 0)).reshape(-1, bands)
+    all_bands = []
+    band_names = []
+    profile = None
+    for tif_file in tif_files:
+        with rasterio.open(tif_file) as src:
+            data = src.read()
+            all_bands.append(data)
+            # If band names are available
+            if src.descriptions:
+                band_names.extend(src.descriptions)
+            else:
+                band_names.extend([f"{tif_file.stem}_band_{i}" for i in range(data.shape[0])])
+            if profile is None:
+                profile = src.profile
+
+    features = np.concatenate(all_bands, axis=0)
+    bands, h, w = features.shape
+    print(f"Input has {bands} features")
+    print(f"Band names: {band_names}")
+
+    expected_features = set(model.feature_names_in_)
+    actual_features = set(band_names)
+
+    missing = expected_features - actual_features
+    extra = actual_features - expected_features
+
+    print(f"Missing features ({len(missing)}): {sorted(missing)}")
+    print(f"Extra features ({len(extra)}): {sorted(extra)}")
+
+    # Filter to only common features in the model's expected order
+    common = expected_features & actual_features
+    ordered_features = [f for f in model.feature_names_in_ if f in common]
+    indices = [band_names.index(f) for f in ordered_features]
+
+    features_filtered = features[indices, :, :]
+    bands = len(indices)
+    print(f"Using {bands} common features: {ordered_features}")
+
+    data = np.transpose(features_filtered, (1, 2, 0)).reshape(-1, bands)
     preds = model.predict(data).reshape(h, w)
 
     out_dir = OUTPUT_ROOT / tilenum
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = out_dir / f"tilenum{tilenum}_aef_{year}_pred.tif"
+    out_path = out_dir / f"tilenum{tilenum}_features_{year}_pred.tif"
 
     profile.update(count=1, dtype="uint8", compress="lzw")
 
@@ -76,6 +137,7 @@ def run_rf_inference(model, tilenum, year):
         dst.write(preds, 1)
 
     print(f"[RF] Wrote {out_path}")
+
 
 def run_fire_behavior(tilenum, year):
     tile_dir = TEMP_ROOT / tilenum
@@ -95,7 +157,7 @@ def run_fire_behavior(tilenum, year):
     }
 
     pred_inputs = lf_inputs | {
-        "fuel_model": out_dir / f"tilenum{tilenum}_aef_{year}_pred.tif"
+        "fuel_model": out_dir / f"tilenum{tilenum}_features_{year}_pred.tif"
     }
 
     with rasterio.open(lf_inputs["aspect"]) as src:
@@ -254,7 +316,7 @@ def run_metrics(year, do_plot=False):
         )
         fm40_pred = (
             tile_dir
-            / f"tilenum{tile}_aef_{year}_pred.tif"
+            / f"tilenum{tile}_features_{year}_pred.tif"
         )
 
         diff, pct, pct_abs = percent_diff(fm40_label, fm40_pred)
