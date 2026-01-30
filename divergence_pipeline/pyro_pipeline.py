@@ -79,7 +79,7 @@ def load_rf_model():
 #     print(f"[RF] Wrote {out_path}")
 
 def run_rf_inference(model, tilenum, year):
-    tile_dir = TEMP_ROOT / tilenum
+    tile_dir = TEMP_ROOT / str(year) / tilenum
     tif_files = [f for f in tile_dir.glob("*.tif") if "label" not in f.name]
 
     print(f"Model expects {model.n_features_in_} features")
@@ -140,7 +140,7 @@ def run_rf_inference(model, tilenum, year):
 
 
 def run_fire_behavior(tilenum, year):
-    tile_dir = TEMP_ROOT / tilenum
+    tile_dir = TEMP_ROOT / str(year) / tilenum
     out_dir = OUTPUT_ROOT / tilenum
 
     def f(k): return next(tile_dir.glob(f"*{k}*.tif"))
@@ -311,6 +311,7 @@ def run_metrics(year, do_plot=False):
 
         fm40_label = (
             TEMP_ROOT
+            / str(year)
             / tile
             / f"tilenum{tile}_fm40label_{year}.tif"
         )
@@ -401,12 +402,12 @@ def run_metrics(year, do_plot=False):
 
     print("[METRICS] Plotting complete")
 
-def download_tile_from_gcs(tilenum):
+def download_tile_from_gcs(tilenum, year):
     client = storage.Client()
     bucket = client.bucket(BUCKET_NAME)
 
-    tile_prefix = f"{tilenum}/"
-    tile_dir = TEMP_ROOT / tilenum
+    tile_prefix = f"{year}/{tilenum}/"
+    tile_dir = TEMP_ROOT / str(year) / tilenum
     tile_dir.mkdir(parents=True, exist_ok=True)
 
     blobs = list(bucket.list_blobs(prefix=tile_prefix))
@@ -454,7 +455,7 @@ def main():
     model = load_rf_model()
 
     for tilenum in args.tilenums:
-        download_tile_from_gcs(tilenum)
+        download_tile_from_gcs(tilenum, args.year)
         run_rf_inference(model, tilenum, args.year)
         run_fire_behavior(tilenum, args.year)
 
