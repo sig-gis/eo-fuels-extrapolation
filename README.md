@@ -76,21 +76,75 @@ conda install numpy==1.26.4
 ```
 
 # Main Pyretechnics Workflow
-This workflow can be completed in two steps. First step, run the `export_embeddings_tiles.py` file, with a list of tiles, to export to the necessary files from Earth Engine.
+The Pyretechnics analysis is now organized as a five-step pipeline in `divergence_pipeline/`.
+Run the scripts in order to export EO inputs, sample training data, train models, evaluate
+tile-level accuracy, and run the full fire behavior + divergence analysis.
 
-Example: 
+### 1) Export per-tile EO inputs from Earth Engine
+Exports satellite embeddings, LANDFIRE fuels, canopy structure, terrain, HLS stats, climate
+normals, and vegetation layers to GCS, skipping any outputs that already exist.
+
 ```
-python export_embeddings_tiles.py --tilenums 01180 00371
+python divergence_pipeline/1_export_embeddings_tiles.py \
+  --year 2022 \
+  --tilenums 01180 00371
 ```
 
-Second step, run the `pyro_pipeline.py` file, with a list of tiles, to complete the analysis and get the final behavior metrics and divergence stats. 
+Optional: limit by pyrome IDs instead of explicit tiles.
+```
+python divergence_pipeline/1_export_embeddings_tiles.py \
+  --year 2022 \
+  --pyromes 12 27
+```
 
-Example:
+### 2) Mosaic tiles locally and sample training points
+Downloads the GCS GeoTIFFs for a pyrome, mosaics by layer, and creates stratified samples.
+Outputs CSVs are uploaded back to GCS.
+
 ```
-python pyro_pipeline.py --tilenums 01180 00371
+python divergence_pipeline/2_local_mosaic_sample.py \
+  --pyromes 27 \
+  --year 2022 \
+  --mode equal \
+  --points-per-class 3000
 ```
 
-Example to plot divergence stats:
+### 3) Train random-forest models from sample CSVs
+Trains a RF classifier on the sampled data. Use `--pyromes` to merge per-pyrome CSVs or
+`--csv` to train from a single local file.
+
 ```
-python pyro_pipeline.py --tilenums 01180 00371 --plot
+python divergence_pipeline/3_train_models.py \
+  --pyromes 27 \
+  --year 2022 \
+  --mode equal \
+  --output-dir data
+```
+
+### 4) Compute tile-level accuracy metrics
+Downloads tile GeoTIFFs, runs inference using a trained model, and writes a CSV of metrics.
+
+```
+python divergence_pipeline/4_tile_accuracy_metrics.py \
+  --model-path temp/geoai-fuels-tiles/utils/rf_zone_27.joblib \
+  --tilenums 01180 00371 \
+  --year 2022
+```
+
+### 5) Run full Pyretechnics fire behavior + divergence analysis
+Runs inference, simulates fire behavior for LANDFIRE vs predicted fuels, and outputs
+divergence statistics (plus optional Plotly HTML plots).
+
+```
+python divergence_pipeline/5_pyro_pipeline.py \
+  --tilenums 01180 00371 \
+  --year 2022
+```
+
+Optional: generate Plotly plots of divergence metrics.
+```
+python divergence_pipeline/5_pyro_pipeline.py \
+  --tilenums 01180 00371 \
+  --year 2022 \
+  --plot
 ```
