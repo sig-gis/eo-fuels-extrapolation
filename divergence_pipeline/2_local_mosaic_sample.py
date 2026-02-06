@@ -114,12 +114,77 @@ def build_vrt(layer_name, tif_paths, output_dir):
     return vrt_path
 
 
+def single_band_name(name):
+    def _resolver(count):
+        if count == 1:
+            return [name]
+        return [f"{name}_{idx + 1}" for idx in range(count)]
+
+    return _resolver
+
+
+def seasonal_band_names():
+    seasons = ["fall", "spring", "summer", "winter"]
+    return [f"B{band}_{season}" for band in range(2, 8) for season in seasons]
+
+
+def spectral_stat_names():
+    stats = ["max", "median", "min"]
+    indices = ["EVI", "MSAVI", "NBR", "NDMI", "NDVI", "SAVI", "TCB", "TCG", "TSW", "VARI"]
+    return [f"{idx}_{stat}" for idx in indices for stat in stats]
+
+
+BAND_NAME_OVERRIDES = {
+    "aef": lambda count: [f"A{idx:02d}" for idx in range(count)],
+    "ch": single_band_name("ch"),
+    "cc": single_band_name("cc"),
+    "cbh": single_band_name("cbh"),
+    "cbd": single_band_name("cbd"),
+    "elevation": single_band_name("elevation"),
+    "slope": single_band_name("slope"),
+    "aspect": single_band_name("aspect"),
+    "mtpi": single_band_name("mtpi"),
+    "bps": single_band_name("BPS"),
+    "evc": single_band_name("EVC"),
+    "evt": single_band_name("EVT"),
+    "evh": single_band_name("EVH"),
+    "spectral_stats": lambda count: spectral_stat_names()[:count],
+    "hls_band_stats": lambda count: seasonal_band_names()[:count],
+    "climatenormals": lambda count: [
+        "ppt_norm",
+        "tmean_norm",
+        "tmin_norm",
+        "tmax_norm",
+        "tdmean_norm",
+        "vpdmin_norm",
+        "vpdmax_norm",
+        "solclear_norm",
+        "solslope_norm",
+        "soltotal_norm",
+    ][:count],
+    "prism": lambda count: [
+        "ppt",
+        "tmean",
+        "tmin",
+        "tmax",
+        "tdmean",
+        "vpdmin",
+        "vpdmax",
+    ][:count],
+}
+
+
 def get_band_names(dataset, prefix):
+    override = BAND_NAME_OVERRIDES.get(prefix)
     descriptions = list(dataset.descriptions) if dataset.descriptions else []
+    if override and not descriptions:
+        return override(dataset.count)
+
     names = []
     for idx in range(dataset.count):
         desc = descriptions[idx] if idx < len(descriptions) else None
         names.append(desc if desc else f"{prefix}_b{idx + 1}")
+
     return names
 
 
@@ -246,6 +311,14 @@ def main():
         help="Delete temp folder after completion",
     )
     parser.add_argument(
+        "--reuse-downloads",
+        action="store_true",
+        help=(
+            "Reuse existing per-pyrome downloads if the temp folder already exists "
+            "(skip re-downloading tiles)."
+        ),
+    )
+    parser.add_argument(
         "--gpkg-path",
         default=r"C:\Users\edalt\RD_Fuels\eo-fuels-extrapolation\temp\tiles48km_polygons_firefactor.gpkg",
         help="Local path to tiles GPKG",
@@ -277,8 +350,11 @@ def main():
         print(f"Pyrome {pyrome_id}: {len(tilenums)} tiles")
         pyrome_temp = base_temp / f"pyrome_{pyrome_id}"
         if pyrome_temp.exists():
-            shutil.rmtree(pyrome_temp)
-        pyrome_temp.mkdir(parents=True, exist_ok=True)
+            if not args.reuse_downloads:
+                shutil.rmtree(pyrome_temp)
+                pyrome_temp.mkdir(parents=True, exist_ok=True)
+        else:
+            pyrome_temp.mkdir(parents=True, exist_ok=True)
 
         all_layer_paths = {layer: [] for layer, _, _, _ in LAYER_SPECS}
 

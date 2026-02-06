@@ -3,9 +3,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from google.cloud import storage
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 import joblib
 
 
@@ -64,8 +66,23 @@ def parse_args():
         help="Directory containing pyrome sample CSVs.",
     )
     parser.add_argument(
+        "--bucket",
+        default="geoai-fuels-tiles",
+        help="GCS bucket containing pyrome sample CSVs.",
+    )
+    parser.add_argument(
+        "--gcs-prefix",
+        default="samples",
+        help="GCS prefix for pyrome CSVs (default: samples).",
+    )
+    parser.add_argument(
         "--combined-out",
         help="Optional output path to write merged CSV.",
+    )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="Merge pyrome CSVs and train a single model instead of per-pyrome.",
     )
     parser.add_argument(
         "--train-pyromes",
@@ -81,7 +98,7 @@ def parse_args():
     parser.add_argument(
         "--test-size",
         type=float,
-        default=0.25,
+        default=0.3,
         help="Test split ratio.",
     )
     parser.add_argument(
@@ -98,9 +115,44 @@ def parse_args():
     return parser.parse_args()
 
 
+def pyrome_csv_filename(pyrome_id: int, year: int, mode: str) -> str:
+    return f"pyrome_{pyrome_id}_{year}_{mode}_local_samples.csv"
+
+
 def pyrome_csv_path(samples_dir: Path, pyrome_id: int, year: int, mode: str) -> Path:
-    filename = f"pyrome_{pyrome_id}_{year}_{mode}_local_samples.csv"
+    filename = f"samples_pyrome_{pyrome_id}_{pyrome_csv_filename(pyrome_id, year, mode)}"
     return samples_dir / filename
+
+
+def download_pyrome_csv(
+    samples_dir: Path,
+    pyrome_id: int,
+    year: int,
+    mode: str,
+    bucket_name: str,
+    gcs_prefix: str,
+) -> Path:
+    local_path = pyrome_csv_path(samples_dir, pyrome_id, year, mode)
+    if local_path.exists():
+        return local_path
+
+    samples_dir.mkdir(parents=True, exist_ok=True)
+
+    gcs_filename = pyrome_csv_filename(pyrome_id, year, mode)
+    blob_name = f"{gcs_prefix}/pyrome_{pyrome_id}/{gcs_filename}".lstrip("/")
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    if not blob.exists():
+        raise FileNotFoundError(
+            f"CSV not found at gs://{bucket_name}/{blob_name}"
+        )
+
+    print(f"Downloading gs://{bucket_name}/{blob_name}")
+    blob.download_to_filename(local_path)
+    return local_path
 
 
 def load_csv(csv_path: Path) -> pd.DataFrame:
@@ -109,12 +161,28 @@ def load_csv(csv_path: Path) -> pd.DataFrame:
     return pd.read_csv(csv_path)
 
 
-def merge_pyrome_csvs(pyromes, year, mode, samples_dir: Path) -> pd.DataFrame:
+def merge_pyrome_csvs(
+    pyromes,
+    year,
+    mode,
+    samples_dir: Path,
+    bucket_name: str,
+    gcs_prefix: str,
+) -> pd.DataFrame:
     frames = []
     missing = []
     for pyrome_id in pyromes:
-        csv_path = pyrome_csv_path(samples_dir, pyrome_id, year, mode)
-        if not csv_path.exists():
+        try:
+            csv_path = download_pyrome_csv(
+                samples_dir,
+                pyrome_id,
+                year,
+                mode,
+                bucket_name,
+                gcs_prefix,
+            )
+        except FileNotFoundError:
+            csv_path = pyrome_csv_path(samples_dir, pyrome_id, year, mode)
             missing.append(str(csv_path))
             continue
         frame = pd.read_csv(csv_path)
@@ -135,11 +203,22 @@ def merge_pyrome_csvs(pyromes, year, mode, samples_dir: Path) -> pd.DataFrame:
 
 def get_feature_list(df: pd.DataFrame):
     feature_list = df.columns.to_list()
-    for col in ["system:index", ".geo"]:
+    for col in ["system:index", ".geo", "x", "y", "pyrome_id", "cc", "ch", "cbh", "cbd"]:
         if col in feature_list:
             feature_list.remove(col)
 
+    fm40_like = [
+        col for col in feature_list
+        if "fm40" in col.lower() and col != "FBFM40Parent"
+    ]
+    for col in fm40_like:
+        feature_list.remove(col)
+
     alphaearth_features = [f"A{str(i).zfill(2)}" for i in range(64)]
+    if not all(feature in feature_list for feature in alphaearth_features):
+        aef_features = [f"aef_b{idx + 1}" for idx in range(64)]
+        if all(feature in feature_list for feature in aef_features):
+            alphaearth_features = aef_features
     label_list = ["FBFM40", "FBFM40Parent"]
     feature_list_wo_alphaearth = [
         feature for feature in feature_list
@@ -157,6 +236,21 @@ def remap_parent_labels(series: pd.Series) -> pd.Series:
     return remapped.astype("Int64")
 
 
+def evaluate_metrics(y_true, y_pred, prefix: str) -> dict:
+    return {
+        f"{prefix}_accuracy": accuracy_score(y_true, y_pred),
+        f"{prefix}_f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+        f"{prefix}_precision_weighted": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        f"{prefix}_recall_weighted": recall_score(y_true, y_pred, average="weighted", zero_division=0),
+    }
+
+
+def sample_random_labels(y_true: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    values, counts = np.unique(y_true, return_counts=True)
+    probabilities = counts / counts.sum()
+    return rng.choice(values, size=len(y_true), replace=True, p=probabilities)
+
+
 def train_model(df, train_features, label, test_size, n_estimators, output_path):
     X = np.nan_to_num(df[train_features].to_numpy(), 0)
     y = df[label].to_numpy().ravel()
@@ -166,10 +260,8 @@ def train_model(df, train_features, label, test_size, n_estimators, output_path)
     )
 
     scaler = StandardScaler()
-    encoder = LabelEncoder().fit(PARENT_CLASSES)
-
     X_train_scaled = scaler.fit_transform(X_train)
-    y_train_encode = encoder.transform(y_train)
+    y_train_encode = y_train
 
     rf = RandomForestClassifier(
         n_estimators=n_estimators,
@@ -183,7 +275,23 @@ def train_model(df, train_features, label, test_size, n_estimators, output_path)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(rf, output_path)
+    scaler_path = output_path.with_name(f"{output_path.stem}_scaler.joblib")
+    joblib.dump(scaler, scaler_path)
     print(f"Saved {output_path}")
+    print(f"Saved {scaler_path}")
+
+    X_test_scaled = scaler.transform(X_test)
+    X_test_df = pd.DataFrame(X_test_scaled, columns=train_features)
+    y_pred = rf.predict(X_test_df)
+    model_metrics = evaluate_metrics(y_test, y_pred, "model")
+
+    rng = np.random.default_rng(SEED)
+    random_preds = sample_random_labels(y_test, rng)
+    baseline_metrics = evaluate_metrics(y_test, random_preds, "baseline")
+
+    metrics = {**model_metrics, **baseline_metrics}
+    metrics["num_samples"] = len(y_test)
+    return metrics
 
 
 def main():
@@ -198,7 +306,14 @@ def main():
         df = load_csv(Path(args.csv))
     else:
         samples_dir = Path(args.samples_dir)
-        df = merge_pyrome_csvs(args.pyromes, args.year, args.mode, samples_dir)
+        df = merge_pyrome_csvs(
+            args.pyromes,
+            args.year,
+            args.mode,
+            samples_dir,
+            args.bucket,
+            args.gcs_prefix,
+        )
 
         if args.combined_out:
             combined_path = Path(args.combined_out)
@@ -206,45 +321,65 @@ def main():
             df.to_csv(combined_path, index=False)
             print(f"Wrote combined CSV to {combined_path}")
 
-    if args.label != "FBFM40Parent":
-        raise ValueError("This script is configured to train on FBFM40Parent")
-
-    df["FBFM40Parent"] = remap_parent_labels(df["FBFM40Parent"])
-    if df["FBFM40Parent"].isna().any():
-        raise ValueError(
-            "Some labels could not be remapped. Check input classes."
-        )
+    label_name = args.label
+    if label_name == "FBFM40Parent":
+        df[label_name] = remap_parent_labels(df[label_name])
+        if df[label_name].isna().any():
+            raise ValueError(
+                "Some labels could not be remapped. Check input classes."
+            )
 
     train_features = get_feature_list(df)
 
     output_dir = Path(args.output_dir)
 
+    metrics_rows = []
+
     if args.pyromes and not args.csv:
-        zones_to_train = args.train_pyromes or args.pyromes
-        for zone in zones_to_train:
-            print(f"Training model for pyrome {zone}")
-            zone_df = df if len(zones_to_train) == 1 else df[df["pyrome_id"] == zone]
-            if zone_df.empty:
-                raise RuntimeError(f"No data for pyrome {zone}")
-            output_path = output_dir / f"rf_pyrome_{zone}.joblib"
-            train_model(
-                zone_df,
+        if args.merge:
+            output_path = output_dir / "rf_pyromes_merged.joblib"
+            metrics = train_model(
+                df,
                 train_features,
-                label="FBFM40Parent",
+                label=label_name,
                 test_size=args.test_size,
                 n_estimators=args.n_estimators,
                 output_path=output_path,
             )
+            metrics_rows.append({"pyrome_id": "merged", **metrics})
+        else:
+            zones_to_train = args.train_pyromes or args.pyromes
+            for zone in zones_to_train:
+                print(f"Training model for pyrome {zone}")
+                zone_df = df if len(zones_to_train) == 1 else df[df["pyrome_id"] == zone]
+                if zone_df.empty:
+                    raise RuntimeError(f"No data for pyrome {zone}")
+                output_path = output_dir / f"rf_pyrome_{zone}.joblib"
+                metrics = train_model(
+                    zone_df,
+                    train_features,
+                    label=label_name,
+                    test_size=args.test_size,
+                    n_estimators=args.n_estimators,
+                    output_path=output_path,
+                )
+                metrics_rows.append({"pyrome_id": zone, **metrics})
     else:
         output_path = output_dir / "rf_model.joblib"
-        train_model(
+        metrics = train_model(
             df,
             train_features,
-            label="FBFM40Parent",
+            label=label_name,
             test_size=args.test_size,
             n_estimators=args.n_estimators,
             output_path=output_path,
         )
+        metrics_rows.append({"pyrome_id": "all", **metrics})
+
+    metrics_df = pd.DataFrame(metrics_rows)
+    metrics_out = output_dir / "rf_training_accuracy_baseline.csv"
+    metrics_df.to_csv(metrics_out, index=False)
+    print(f"Saved training metrics to {metrics_out}")
 
 
 if __name__ == "__main__":
