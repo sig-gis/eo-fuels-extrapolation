@@ -3,7 +3,6 @@ from pathlib import Path
 import numpy as np
 import joblib
 import rasterio
-from google.cloud import storage
 import pandas as pd
 import plotly.express as px
 
@@ -25,34 +24,96 @@ from sklearn.metrics import (
     r2_score,
 )
 
-TEMP_ROOT = Path.cwd() / "temp" / "geoai-fuels-tiles"
+TEMP_ROOT = Path.cwd() / "temp"
+PYROME_ROOT = Path.cwd() / "temp"
 OUTPUT_ROOT = Path.cwd() / "outputs"
+MODEL_ROOT = Path.cwd() / "data"
 
 TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-BUCKET_NAME = "geoai-fuels-tiles"
-# MODEL_BLOB = "utils/rfmodel_conus_1000ptsperclass_150trees.joblib"
-MODEL_BLOB = "utils/rf_zone_27.joblib"
+MERGED_MODEL_NAME = "rf_pyromes_merged.joblib"
 
-def load_rf_model():
-    local_model = TEMP_ROOT / MODEL_BLOB
-    local_model.parent.mkdir(parents=True, exist_ok=True)
 
-    client = storage.Client()
-    bucket = client.bucket(BUCKET_NAME)
-    blob = bucket.blob(MODEL_BLOB)
+def seasonal_band_names():
+    seasons = ["fall", "spring", "summer", "winter"]
+    return [f"B{band}_{season}" for band in range(2, 8) for season in seasons]
 
-    if not blob.exists():
-        raise FileNotFoundError(f"Model not found: gs://{BUCKET_NAME}/{MODEL_BLOB}")
 
-    if not local_model.exists():
-        print(f"Downloading RF model: {MODEL_BLOB}")
-        blob.download_to_filename(local_model)
+def spectral_stat_names():
+    stats = ["max", "median", "min"]
+    indices = ["EVI", "MSAVI", "NBR", "NDMI", "NDVI", "SAVI", "TCB", "TCG", "TSW", "VARI"]
+    return [f"{idx}_{stat}" for idx in indices for stat in stats]
 
-    model = joblib.load(local_model)
+
+BAND_NAME_OVERRIDES = {
+    "aef": lambda count: [f"aef_b{idx + 1}" for idx in range(count)],
+    "fm40label": lambda count: [f"fm40label_b{idx + 1}" for idx in range(count)],
+    "fm40parentlabel": lambda count: [f"fm40parentlabel_b{idx + 1}" for idx in range(count)],
+    "ch": lambda count: [f"ch_b{idx + 1}" for idx in range(count)],
+    "cc": lambda count: [f"cc_b{idx + 1}" for idx in range(count)],
+    "cbh": lambda count: [f"cbh_b{idx + 1}" for idx in range(count)],
+    "cbd": lambda count: [f"cbd_b{idx + 1}" for idx in range(count)],
+    "elevation": lambda count: [f"elevation_b{idx + 1}" for idx in range(count)],
+    "slope": lambda count: [f"slope_b{idx + 1}" for idx in range(count)],
+    "aspect": lambda count: [f"aspect_b{idx + 1}" for idx in range(count)],
+    "mtpi": lambda count: [f"mtpi_b{idx + 1}" for idx in range(count)],
+    "bps": lambda count: [f"bps_b{idx + 1}" for idx in range(count)],
+    "evc": lambda count: [f"evc_b{idx + 1}" for idx in range(count)],
+    "evt": lambda count: [f"evt_b{idx + 1}" for idx in range(count)],
+    "evh": lambda count: [f"evh_b{idx + 1}" for idx in range(count)],
+    "spectral_stats": lambda count: [f"spectral_stats_b{idx + 1}" for idx in range(count)],
+    "hls_band_stats": lambda count: [f"hls_band_stats_b{idx + 1}" for idx in range(count)],
+    "climatenormals": lambda count: [f"climatenormals_b{idx + 1}" for idx in range(count)],
+    "prism": lambda count: [f"prism_b{idx + 1}" for idx in range(count)],
+}
+
+
+def guess_layer_prefix(filename: str) -> str:
+    stem = Path(filename).stem
+    parts = stem.split("_")
+    if parts and parts[0].startswith("tilenum"):
+        parts = parts[1:]
+    if parts and parts[-1].isdigit():
+        parts = parts[:-1]
+    if not parts:
+        return stem
+    return "_".join(parts)
+
+
+def get_band_names(dataset, prefix):
+    override = BAND_NAME_OVERRIDES.get(prefix)
+    descriptions = list(dataset.descriptions) if dataset.descriptions else []
+    if override:
+        return override(dataset.count)
+
+    if dataset.count == 1:
+        return [f"{prefix}_b1"]
+
+    names = []
+    for idx in range(dataset.count):
+        desc = descriptions[idx] if idx < len(descriptions) else None
+        names.append(desc if desc else f"{prefix}_b{idx + 1}")
+
+    return names
+
+def load_rf_model(model_path: Path):
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
+    model = joblib.load(model_path)
     print("Loaded RF model:", type(model))
-    return model
+    scaler_path = model_path.with_name(f"{model_path.stem}_scaler.joblib")
+    if not scaler_path.exists():
+        raise FileNotFoundError(f"Scaler not found: {scaler_path}")
+    scaler = joblib.load(scaler_path)
+    print("Loaded scaler:", type(scaler))
+    return model, scaler
+
+
+def resolve_model_path(pyrome_id: int, merge: bool) -> Path:
+    if merge:
+        return MODEL_ROOT / MERGED_MODEL_NAME
+    return MODEL_ROOT / f"rf_pyrome_{pyrome_id}.joblib"
 
 # def run_rf_inference(model, tilenum, year):
 #     tile_dir = TEMP_ROOT / tilenum
@@ -78,8 +139,7 @@ def load_rf_model():
 
 #     print(f"[RF] Wrote {out_path}")
 
-def run_rf_inference(model, tilenum, year):
-    tile_dir = TEMP_ROOT / str(year) / tilenum
+def run_rf_inference(model, scaler, tile_dir: Path, tilenum, year):
     tif_files = [f for f in tile_dir.glob("*.tif") if "label" not in f.name]
 
     print(f"Model expects {model.n_features_in_} features")
@@ -93,10 +153,8 @@ def run_rf_inference(model, tilenum, year):
             data = src.read()
             all_bands.append(data)
             # If band names are available
-            if src.descriptions:
-                band_names.extend(src.descriptions)
-            else:
-                band_names.extend([f"{tif_file.stem}_band_{i}" for i in range(data.shape[0])])
+            layer_prefix = guess_layer_prefix(tif_file.name)
+            band_names.extend(get_band_names(src, layer_prefix))
             if profile is None:
                 profile = src.profile
 
@@ -124,12 +182,14 @@ def run_rf_inference(model, tilenum, year):
     print(f"Using {bands} common features: {ordered_features}")
 
     data = np.transpose(features_filtered, (1, 2, 0)).reshape(-1, bands)
+    if scaler is not None:
+        data = scaler.transform(data)
     preds = model.predict(data).reshape(h, w)
 
     out_dir = OUTPUT_ROOT / tilenum
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = out_dir / f"tilenum{tilenum}_features_{year}_pred.tif"
+    out_path = out_dir / f"tilenum{tilenum}_fm40parent_pred_{year}.tif"
 
     profile.update(count=1, dtype="uint8", compress="lzw")
 
@@ -139,8 +199,7 @@ def run_rf_inference(model, tilenum, year):
     print(f"[RF] Wrote {out_path}")
 
 
-def run_fire_behavior(tilenum, year):
-    tile_dir = TEMP_ROOT / str(year) / tilenum
+def run_fire_behavior(tile_dir: Path, tilenum, year):
     out_dir = OUTPUT_ROOT / tilenum
 
     def f(k): return next(tile_dir.glob(f"*{k}*.tif"))
@@ -149,7 +208,7 @@ def run_fire_behavior(tilenum, year):
         "elevation": f("elevation"),
         "slope": f("slope"),
         "aspect": f("aspect"),
-        "fuel_model": f("fm40label"),
+        "fuel_model": f("fm40parentlabel"),
         "canopy_cover": f("cc"),
         "canopy_height": f("ch"),
         "canopy_base_height": f("cbh"),
@@ -157,7 +216,7 @@ def run_fire_behavior(tilenum, year):
     }
 
     pred_inputs = lf_inputs | {
-        "fuel_model": out_dir / f"tilenum{tilenum}_features_{year}_pred.tif"
+        "fuel_model": out_dir / f"tilenum{tilenum}_fm40parent_pred_{year}.tif"
     }
 
     with rasterio.open(lf_inputs["aspect"]) as src:
@@ -289,7 +348,7 @@ def accuracy_metric(y_true, y_pred, metric, **kwargs):
 
     return float(fn(a, b, **kwargs))
 
-def run_metrics(year, do_plot=False):
+def run_metrics(pyrome_tiles, year, do_plot=False):
     categories = [
         "fire_type",
         "fireline_intensity",
@@ -302,22 +361,13 @@ def run_metrics(year, do_plot=False):
 
     print("\n[METRICS] Computing divergence metrics")
 
-    for tile_dir in sorted(OUTPUT_ROOT.iterdir()):
-        if not tile_dir.is_dir():
-            continue
-
-        tile = tile_dir.name
+    for tile, tile_dir in pyrome_tiles.items():
         results[tile] = {}
 
-        fm40_label = (
-            TEMP_ROOT
-            / str(year)
-            / tile
-            / f"tilenum{tile}_fm40label_{year}.tif"
-        )
+        fm40_label = tile_dir / f"tilenum{tile}_fm40parentlabel_{year}.tif"
         fm40_pred = (
-            tile_dir
-            / f"tilenum{tile}_features_{year}_pred.tif"
+            OUTPUT_ROOT / tile
+            / f"tilenum{tile}_fm40parent_pred_{year}.tif"
         )
 
         diff, pct, pct_abs = percent_diff(fm40_label, fm40_pred)
@@ -332,8 +382,8 @@ def run_metrics(year, do_plot=False):
         )
 
         for category in categories:
-            true_pt = tile_dir / f"LF_FBFM40_{category}.tif"
-            pred_pt = tile_dir / f"predicted_FBFM40_{category}.tif"
+            true_pt = OUTPUT_ROOT / tile / f"LF_FBFM40_{category}.tif"
+            pred_pt = OUTPUT_ROOT / tile / f"predicted_FBFM40_{category}.tif"
 
             diff, pct, pct_abs = percent_diff(true_pt, pred_pt)
             results[tile][f"{category}_diff"] = diff
@@ -402,41 +452,40 @@ def run_metrics(year, do_plot=False):
 
     print("[METRICS] Plotting complete")
 
-def download_tile_from_gcs(tilenum, year):
-    client = storage.Client()
-    bucket = client.bucket(BUCKET_NAME)
-
-    tile_prefix = f"{year}/{tilenum}/"
-    tile_dir = TEMP_ROOT / str(year) / tilenum
-    tile_dir.mkdir(parents=True, exist_ok=True)
-
-    blobs = list(bucket.list_blobs(prefix=tile_prefix))
-
-    if not blobs:
-        raise FileNotFoundError(
-            f"No blobs found for tile {tilenum} in gs://{BUCKET_NAME}/{tile_prefix}"
-        )
-
-    for blob in blobs:
-        if blob.name.endswith("/"):
+def list_pyrome_tiles(pyrome_id, tilenums=None):
+    pyrome_dir = PYROME_ROOT / f"pyrome_{pyrome_id}"
+    if not pyrome_dir.exists():
+        raise FileNotFoundError(f"Pyrome temp folder not found: {pyrome_dir}")
+    tiles = {}
+    for path in sorted(p for p in pyrome_dir.iterdir() if p.is_dir()):
+        folder = path.name
+        if not folder.startswith("tile_"):
             continue
-
-        local_path = tile_dir / Path(blob.name).name
-        if not local_path.exists():
-            print(f"Downloading {blob.name}")
-            blob.download_to_filename(local_path)
-
-    return tile_dir
+        tilenum = folder.replace("tile_", "", 1)
+        tiles[tilenum] = path
+    if tilenums:
+        tiles = {tile: path for tile, path in tiles.items() if tile in tilenums}
+    return tiles, pyrome_dir
 
 def main():
     parser = argparse.ArgumentParser(
         description="Run full FM40 RF → fire behavior → evaluation pipeline"
     )
     parser.add_argument(
+        "--pyromes",
+        nargs="+",
+        type=int,
+        help="Pyrome IDs to process (uses temp/pyrome_{id} tiles)",
+    )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="Use merged pyrome model (rf_pyromes_merged.joblib) if available.",
+    )
+    parser.add_argument(
         "--tilenums",
         nargs="+",
-        required=True,
-        help="Tile numbers to process (e.g. 01180 00371)",
+        help="Tile numbers to process (filters tiles within the listed pyromes).",
     )
     parser.add_argument(
         "--year",
@@ -452,14 +501,23 @@ def main():
 
     args = parser.parse_args()
 
-    model = load_rf_model()
+    if not args.pyromes:
+        raise ValueError("Provide --pyromes (tiles are read from temp/pyrome_{id}/tile_*/)")
 
-    for tilenum in args.tilenums:
-        download_tile_from_gcs(tilenum, args.year)
-        run_rf_inference(model, tilenum, args.year)
-        run_fire_behavior(tilenum, args.year)
+    all_tiles = {}
+    for pyrome_id in args.pyromes:
+        model_path = resolve_model_path(pyrome_id, args.merge)
+        model, scaler = load_rf_model(model_path)
+        tiles, pyrome_dir = list_pyrome_tiles(pyrome_id, tilenums=args.tilenums)
+        if not tiles:
+            print(f"No tiles found for pyrome {pyrome_id} in {pyrome_dir}")
+            continue
+        for tilenum, tile_dir in tiles.items():
+            run_rf_inference(model, scaler, tile_dir, tilenum, args.year)
+            run_fire_behavior(tile_dir, tilenum, args.year)
+        all_tiles.update(tiles)
 
-    run_metrics(args.year, do_plot=args.plot)
+    run_metrics(all_tiles, args.year, do_plot=args.plot)
 
 if __name__ == "__main__":
     main()
