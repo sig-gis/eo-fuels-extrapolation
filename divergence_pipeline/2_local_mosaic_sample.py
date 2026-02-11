@@ -17,26 +17,43 @@ GPKG_BUCKET = "geoai-fuels-tiles"
 GPKG_BLOB = r"utils/tiles48km_polygons_firefactor.gpkg"
 
 LAYER_SPECS = [
-    ("aef", "tilenum{tilenum}_aef_{year}", True, False),
-    ("fm40label", "tilenum{tilenum}_fm40label_{year}", True, False),
-    ("fm40parentlabel", "tilenum{tilenum}_fm40parentlabel_{year}", False, True),
-    ("ch", "tilenum{tilenum}_ch_{year}", True, False),
-    ("cc", "tilenum{tilenum}_cc_{year}", True, False),
-    ("cbh", "tilenum{tilenum}_cbh_{year}", True, False),
-    ("cbd", "tilenum{tilenum}_cbd_{year}", True, False),
-    ("elevation", "tilenum{tilenum}_elevation", True, False),
-    ("slope", "tilenum{tilenum}_slope", True, False),
-    ("aspect", "tilenum{tilenum}_aspect", True, False),
-    ("mtpi", "tilenum{tilenum}_mtpi", True, False),
-    ("spectral_stats", "tilenum{tilenum}_spectral_stats_{year}", True, False),
-    ("hls_band_stats", "tilenum{tilenum}_hls_band_stats_{year}", True, False),
-    ("climatenormals", "tilenum{tilenum}_climatenormals_{year}", True, False),
-    ("prism", "tilenum{tilenum}_prism_{year}", True, False),
-    ("evc", "tilenum{tilenum}_evc_{year}", True, False),
-    ("evt", "tilenum{tilenum}_evt_{year}", True, False),
-    ("evh", "tilenum{tilenum}_evh_{year}", True, False),
-    ("bps", "tilenum{tilenum}_bps_{year}", True, False),
+    ("aef", "tilenum{tilenum}_aef_{year}"),
+    ("fm40label", "tilenum{tilenum}_fm40label_{year}"),
+    ("fm40parentlabel", "tilenum{tilenum}_fm40parentlabel_{year}"),
+    ("ch", "tilenum{tilenum}_ch_{year}"),
+    ("cc", "tilenum{tilenum}_cc_{year}"),
+    ("cbh", "tilenum{tilenum}_cbh_{year}"),
+    ("cbd", "tilenum{tilenum}_cbd_{year}"),
+    ("elevation", "tilenum{tilenum}_elevation"),
+    ("slope", "tilenum{tilenum}_slope"),
+    ("aspect", "tilenum{tilenum}_aspect"),
+    ("mtpi", "tilenum{tilenum}_mtpi"),
+    ("spectral_stats", "tilenum{tilenum}_spectral_stats_{year}"),
+    ("hls_band_stats", "tilenum{tilenum}_hls_band_stats_{year}"),
+    ("climatenormals", "tilenum{tilenum}_climatenormals_{year}"),
+    ("prism", "tilenum{tilenum}_prism_{year}"),
+    ("evc", "tilenum{tilenum}_evc_{year}"),
+    ("evt", "tilenum{tilenum}_evt_{year}"),
+    ("evh", "tilenum{tilenum}_evh_{year}"),
+    ("bps", "tilenum{tilenum}_bps_{year}"),
 ]
+
+
+def resolve_layer_roles(label_name):
+    """Return {(layer_name): (is_predictor, is_label)} based on selected label."""
+    if label_name == "FBFM40":
+        label_layer = "fm40label"
+    else:
+        label_layer = "fm40parentlabel"
+
+    roles = {}
+    for layer_name, _ in LAYER_SPECS:
+        is_label = layer_name == label_layer
+        # Keep fuel-model label rasters out of predictor stack.
+        is_predictor = layer_name not in {"fm40label", "fm40parentlabel"} and not is_label
+        roles[layer_name] = (is_predictor, is_label)
+
+    return roles
 
 
 def download_gpkg_if_needed(client, local_path):
@@ -81,7 +98,7 @@ def select_tiles_for_pyromes(tiles_gdf, pyrome_gdf):
 def download_tile_layers(bucket, year, tilenum, pyrome_id, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
     layer_paths = {}
-    for layer_name, pattern, _, _ in LAYER_SPECS:
+    for layer_name, pattern in LAYER_SPECS:
         blob_name = (
             f"pyrome_{pyrome_id}/{tilenum}/"
             f"{pattern.format(tilenum=tilenum, year=year)}.tif"
@@ -298,6 +315,12 @@ def main():
     parser.add_argument("--year", type=int, default=2022, help="Data year")
     parser.add_argument("--bucket", default="geoai-fuels-tiles", help="GCS bucket")
     parser.add_argument("--mode", choices=["dist", "equal"], default="equal")
+    parser.add_argument(
+        "--label",
+        choices=["FBFM40", "FBFM40Parent"],
+        default="FBFM40",
+        help="Label to sample (FBFM40 uses original values; FBFM40Parent uses parent classes).",
+    )
     parser.add_argument("--points-per-class", type=int, default=3000)
     parser.add_argument("--seed", type=int, default=333)
     parser.add_argument(
@@ -333,6 +356,7 @@ def main():
     tiles = gpd.read_file(args.gpkg_path)
 
     pyrome_ids = [int(pid) for pid in args.pyromes]
+    layer_roles = resolve_layer_roles(args.label)
     pyrome_gdf = get_pyrome_gdf(pyrome_ids, tiles.crs)
     tile_map = select_tiles_for_pyromes(tiles, pyrome_gdf)
 
@@ -356,7 +380,7 @@ def main():
         else:
             pyrome_temp.mkdir(parents=True, exist_ok=True)
 
-        all_layer_paths = {layer: [] for layer, _, _, _ in LAYER_SPECS}
+        all_layer_paths = {layer: [] for layer, _ in LAYER_SPECS}
 
         for tilenum in tilenums:
             tile_dir = pyrome_temp / f"tile_{tilenum}"
@@ -374,7 +398,8 @@ def main():
         label_vrt = None
         predictor_vrts = []
 
-        for layer_name, _, is_predictor, is_label in LAYER_SPECS:
+        for layer_name, _ in LAYER_SPECS:
+            is_predictor, is_label = layer_roles[layer_name]
             tif_paths = all_layer_paths.get(layer_name, [])
             if not tif_paths:
                 print(f"WARN: No data for layer {layer_name} in pyrome {pyrome_id}")
@@ -416,7 +441,7 @@ def main():
             {
                 "x": [p[0] for p in samples],
                 "y": [p[1] for p in samples],
-                "FBFM40Parent": [p[2] for p in samples],
+                args.label: [p[2] for p in samples],
             }
         )
         for name, values in predictor_data.items():

@@ -92,6 +92,7 @@ def parse_args():
     )
     parser.add_argument(
         "--label",
+        choices=["FBFM40", "FBFM40Parent"],
         default="FBFM40Parent",
         help="Label column to train on.",
     )
@@ -230,10 +231,66 @@ def get_feature_list(df: pd.DataFrame):
 
 
 def remap_parent_labels(series: pd.Series) -> pd.Series:
+    normalized = pd.to_numeric(series, errors="coerce").round().astype("Int64")
     mapping = dict(zip(FROM_VALS, TO_VALS))
-    remapped = series.map(mapping)
-    remapped = remapped.fillna(series)
+    remapped = normalized.map(mapping)
+    remapped = remapped.fillna(normalized)
     return remapped.astype("Int64")
+
+
+def resolve_label_column(df: pd.DataFrame, label_name: str) -> str:
+    """
+    Ensure the requested label exists in df, creating it from compatible sources if needed.
+
+    - FBFM40: prefer FBFM40, fallback to fm40label_b1.
+    - FBFM40Parent: prefer FBFM40Parent, fallback to remap(FBFM40 or fm40label_b1).
+    """
+    available = ", ".join(df.columns)
+
+    if label_name == "FBFM40":
+        if "FBFM40" in df.columns:
+            source = "FBFM40"
+        elif "fm40label_b1" in df.columns:
+            source = "fm40label_b1"
+            df["FBFM40"] = df[source]
+        else:
+            raise ValueError(
+                "Requested label 'FBFM40' not found. Expected 'FBFM40' or fallback "
+                f"'fm40label_b1'. Available columns: {available}"
+            )
+
+        df["FBFM40"] = pd.to_numeric(df[source], errors="coerce").round().astype("Int64")
+        if df["FBFM40"].isna().any():
+            raise ValueError("FBFM40 contains non-numeric or missing values after normalization.")
+        return "FBFM40"
+
+    if "FBFM40Parent" in df.columns:
+        df["FBFM40Parent"] = remap_parent_labels(df["FBFM40Parent"])
+        if df["FBFM40Parent"].isna().any():
+            raise ValueError(
+                "Some FBFM40Parent labels could not be normalized/remapped. "
+                "Check input classes."
+            )
+        return "FBFM40Parent"
+
+    if "FBFM40" in df.columns:
+        parent_source = "FBFM40"
+    elif "fm40label_b1" in df.columns:
+        parent_source = "fm40label_b1"
+    else:
+        raise ValueError(
+            "Requested label 'FBFM40Parent' not found and no source to derive it. "
+            "Expected one of: FBFM40Parent, FBFM40, fm40label_b1. "
+            f"Available columns: {available}"
+        )
+
+    df["FBFM40Parent"] = remap_parent_labels(df[parent_source])
+    if df["FBFM40Parent"].isna().any():
+        raise ValueError(
+            "Some parent labels could not be derived from original FBFM40 values. "
+            "Check input classes."
+        )
+    return "FBFM40Parent"
 
 
 def evaluate_metrics(y_true, y_pred, prefix: str) -> dict:
@@ -321,13 +378,7 @@ def main():
             df.to_csv(combined_path, index=False)
             print(f"Wrote combined CSV to {combined_path}")
 
-    label_name = args.label
-    if label_name == "FBFM40Parent":
-        df[label_name] = remap_parent_labels(df[label_name])
-        if df[label_name].isna().any():
-            raise ValueError(
-                "Some labels could not be remapped. Check input classes."
-            )
+    label_name = resolve_label_column(df, args.label)
 
     train_features = get_feature_list(df)
 
