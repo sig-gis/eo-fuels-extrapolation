@@ -76,13 +76,14 @@ conda install numpy==1.26.4
 ```
 
 # Main Pyretechnics Workflow
-The Pyretechnics analysis is now organized as a five-step pipeline in `divergence_pipeline/`.
-Run the scripts in order to export EO inputs, sample training data, train models, evaluate
-tile-level accuracy, and run the full fire behavior + divergence analysis.
+The Pyretechnics analysis is organized as a six-step pipeline in `divergence_pipeline/`.
+Run the scripts in order to export EO tile inputs, create local pyrome samples, train RF
+models, compute tile-level accuracy, run pyretechnics outputs, and then compute divergence
+metrics.
 
 ### 1) Export per-tile EO inputs from Earth Engine
 Exports satellite embeddings, LANDFIRE fuels, canopy structure, terrain, HLS stats, climate
-normals, and vegetation layers to GCS, skipping any outputs that already exist.
+normals, and vegetation layers to GCS, skipping outputs that already exist.
 
 ```
 python divergence_pipeline/1_export_embeddings_tiles.py \
@@ -90,16 +91,16 @@ python divergence_pipeline/1_export_embeddings_tiles.py \
   --tilenums 01180 00371
 ```
 
-Optional: limit by pyrome IDs instead of explicit tiles.
+Optional: select tiles by pyrome IDs.
 ```
 python divergence_pipeline/1_export_embeddings_tiles.py \
   --year 2022 \
   --pyromes 12 27
 ```
 
-### 2) Mosaic tiles locally and sample training points
-Downloads the GCS GeoTIFFs for a pyrome, mosaics by layer, and creates stratified samples.
-Outputs CSVs are uploaded back to GCS.
+### 2) Build local pyrome mosaics and sample training points
+Downloads pyrome tile GeoTIFFs from GCS, builds per-layer VRT mosaics, performs stratified
+sampling, and uploads per-pyrome sample CSVs back to GCS.
 
 ```
 python divergence_pipeline/2_local_mosaic_sample.py \
@@ -110,8 +111,8 @@ python divergence_pipeline/2_local_mosaic_sample.py \
 ```
 
 ### 3) Train random-forest models from sample CSVs
-Trains a RF classifier on the sampled data. Use `--pyromes` to merge per-pyrome CSVs or
-`--csv` to train from a single local file.
+Trains RF model(s) from pyrome sample CSVs (or a single local CSV), saves model/scaler
+artifacts, and writes training accuracy + baseline metrics.
 
 ```
 python divergence_pipeline/3_train_models.py \
@@ -122,29 +123,48 @@ python divergence_pipeline/3_train_models.py \
 ```
 
 ### 4) Compute tile-level accuracy metrics
-Downloads tile GeoTIFFs, runs inference using a trained model, and writes a CSV of metrics.
+Loads trained model(s), runs tile inference from local `temp/pyrome_*/tile_*` rasters, and
+writes tile-level classification metrics to `outputs/`.
 
 ```
 python divergence_pipeline/4_tile_accuracy_metrics.py \
-  --model-path temp/geoai-fuels-tiles/utils/rf_zone_27.joblib \
+  --pyromes 27 \
+  --year 2022
+```
+
+### 5) Run RF inference + pyretechnics fire behavior outputs
+Runs RF inference per tile and simulates fire behavior for LANDFIRE fuels vs predicted fuels,
+writing output rasters to `outputs/<tilenum>/`.
+
+```
+python divergence_pipeline/5_pyro_pipeline.py \
+  --pyromes 27 \
+  --year 2022
+```
+
+Optional: limit to specific tiles.
+```
+python divergence_pipeline/5_pyro_pipeline.py \
+  --pyromes 27 \
   --tilenums 01180 00371 \
   --year 2022
 ```
 
-### 5) Run full Pyretechnics fire behavior + divergence analysis
-Runs inference, simulates fire behavior for LANDFIRE vs predicted fuels, and outputs
-divergence statistics (plus optional Plotly HTML plots).
+### 6) Compute divergence metrics and optional plots
+Computes summary metrics using fuel-model F1 score, fire-type Jaccard, and
+RMSE for fireline intensity, flame length, spread rate, and spread direction; optionally
+exports Plotly HTML plots of those metrics vs tile accuracy.
 
 ```
-python divergence_pipeline/5_pyro_pipeline.py \
-  --tilenums 01180 00371 \
+python divergence_pipeline/6_divergence_metrics.py \
+  --pyromes 27 \
   --year 2022
 ```
 
-Optional: generate Plotly plots of divergence metrics.
+Optional: disable plot export.
 ```
-python divergence_pipeline/5_pyro_pipeline.py \
-  --tilenums 01180 00371 \
+python divergence_pipeline/6_divergence_metrics.py \
+  --pyromes 27 \
   --year 2022 \
-  --plot
+  --no-plot
 ```

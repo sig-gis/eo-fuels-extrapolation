@@ -111,6 +111,26 @@ def load_accuracy_rows(pyrome_ids, accuracy_col="accuracy"):
     return merged
 
 
+def percent_diff(label_path, pred_path):
+    with rasterio.open(pred_path) as src:
+        pred = src.read(1).flatten()
+    with rasterio.open(label_path) as src:
+        label = src.read(1).flatten()
+
+    diff = pred - label
+    denom = label.max() - label.min()
+    if denom == 0:
+        pct = np.zeros_like(diff, dtype=float)
+    else:
+        pct = diff / denom * 100
+
+    return (
+        float(np.mean(diff)),
+        float(np.mean(pct)),
+        float(np.mean(np.abs(pct))),
+    )
+
+
 def accuracy_metric(y_true, y_pred, metric, **kwargs):
     metrics = {
         "jaccard": jaccard_score,
@@ -228,6 +248,10 @@ def run_metrics(tile_info_map, tile_to_outputdir, accuracy_map, year, label_name
             "accuracy": accuracy_map.get(tile, np.nan),
         }
 
+        diff, pct, pct_abs = percent_diff(fm40_label, fm40_pred)
+        row["fm40_diff"] = diff
+        row["fm40_pct_diff"] = pct
+        row["fm40_pct_diff_abs"] = pct_abs
         row["fm40_f1_score"] = accuracy_metric(
             fm40_label,
             fm40_pred,
@@ -241,6 +265,11 @@ def run_metrics(tile_info_map, tile_to_outputdir, accuracy_map, year, label_name
             if not true_pt.exists() or not pred_pt.exists():
                 print(f"[WARN] Missing pyretechnics outputs for tile {tile}, category {category}")
                 continue
+
+            diff, pct, pct_abs = percent_diff(true_pt, pred_pt)
+            row[f"{category}_diff"] = diff
+            row[f"{category}_pct_diff"] = pct
+            row[f"{category}_pct_diff_abs"] = pct_abs
 
             metric = "jaccard" if category == "fire_type" else "rmse"
             kwargs = {"average": "weighted"} if category == "fire_type" else {}

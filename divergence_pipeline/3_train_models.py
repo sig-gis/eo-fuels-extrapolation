@@ -93,7 +93,7 @@ def parse_args():
     parser.add_argument(
         "--label",
         choices=["FBFM40", "FBFM40Parent"],
-        default="FBFM40Parent",
+        default="FBFM40",
         help="Label column to train on.",
     )
     parser.add_argument(
