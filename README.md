@@ -76,7 +76,7 @@ conda install numpy==1.26.4
 ```
 
 # Main Pyretechnics Workflow
-The Pyretechnics analysis is organized as a six-step pipeline in `divergence_pipeline/`.
+The Pyretechnics analysis is organized in `divergence_pipeline/`.
 Run the scripts in order to export EO tile inputs, create local pyrome samples, train RF
 models, compute tile-level accuracy, run pyretechnics outputs, and then compute divergence
 metrics.
