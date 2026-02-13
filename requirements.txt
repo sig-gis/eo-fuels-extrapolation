@@ -8,4 +8,5 @@ plotly
 earthengine-api
 geemap
 google-cloud-storage
+folium
 numpy==1.24.4
