@@ -76,21 +76,95 @@ conda install numpy==1.26.4
 ```
 
 # Main Pyretechnics Workflow
-This workflow can be completed in two steps. First step, run the `export_embeddings_tiles.py` file, with a list of tiles, to export to the necessary files from Earth Engine.
+The Pyretechnics analysis is organized in `divergence_pipeline/`.
+Run the scripts in order to export EO tile inputs, create local pyrome samples, train RF
+models, compute tile-level accuracy, run pyretechnics outputs, and then compute divergence
+metrics.
 
-Example: 
+### 1) Export per-tile EO inputs from Earth Engine
+Exports satellite embeddings, LANDFIRE fuels, canopy structure, terrain, HLS stats, climate
+normals, and vegetation layers to GCS, skipping outputs that already exist.
+
 ```
-python export_embeddings_tiles.py --tilenums 01180 00371
+python divergence_pipeline/1_export_embeddings_tiles.py \
+  --year 2022 \
+  --tilenums 01180 00371
 ```
 
-Second step, run the `pyro_pipeline.py` file, with a list of tiles, to complete the analysis and get the final behavior metrics and divergence stats. 
+Optional: select tiles by pyrome IDs.
+```
+python divergence_pipeline/1_export_embeddings_tiles.py \
+  --year 2022 \
+  --pyromes 12 27
+```
 
-Example:
+### 2) Build local pyrome mosaics and sample training points
+Downloads pyrome tile GeoTIFFs from GCS, builds per-layer VRT mosaics, performs stratified
+sampling, and uploads per-pyrome sample CSVs back to GCS.
+
 ```
-python pyro_pipeline.py --tilenums 01180 00371
+python divergence_pipeline/2_local_mosaic_sample.py \
+  --pyromes 27 \
+  --year 2022 \
+  --mode equal \
+  --points-per-class 3000
 ```
 
-Example to plot divergence stats:
+### 3) Train random-forest models from sample CSVs
+Trains RF model(s) from pyrome sample CSVs (or a single local CSV), saves model/scaler
+artifacts, and writes training accuracy + baseline metrics.
+
 ```
-python pyro_pipeline.py --tilenums 01180 00371 --plot
+python divergence_pipeline/3_train_models.py \
+  --pyromes 27 \
+  --year 2022 \
+  --mode equal \
+  --output-dir data
+```
+
+### 4) Compute tile-level accuracy metrics
+Loads trained model(s), runs tile inference from local `temp/pyrome_*/tile_*` rasters, and
+writes tile-level classification metrics to `outputs/`.
+
+```
+python divergence_pipeline/4_tile_accuracy_metrics.py \
+  --pyromes 27 \
+  --year 2022
+```
+
+### 5) Run RF inference + pyretechnics fire behavior outputs
+Runs RF inference per tile and simulates fire behavior for LANDFIRE fuels vs predicted fuels,
+writing output rasters to `outputs/<tilenum>/`.
+
+```
+python divergence_pipeline/5_pyro_pipeline.py \
+  --pyromes 27 \
+  --year 2022
+```
+
+Optional: limit to specific tiles.
+```
+python divergence_pipeline/5_pyro_pipeline.py \
+  --pyromes 27 \
+  --tilenums 01180 00371 \
+  --year 2022
+```
+
+### 6) Compute divergence metrics and optional plots
+Computes summary metrics using fuel-model F1 score, fire-type Jaccard, and
+RMSE for fireline intensity, flame length, spread rate, and spread direction; optionally
+exports Plotly HTML plots of those metrics vs tile accuracy.
+
+```
+python divergence_pipeline/6_divergence_metrics.py \
+  --pyromes 27 \
+  --year 2022
+```
+
+Optional: disable plot export.
+```
+python divergence_pipeline/6_divergence_metrics.py \
+  --pyromes 27 \
+  --year 2022 \
+  --no-plot
 ```

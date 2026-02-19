@@ -50,6 +50,17 @@ def download_gpkg_if_needed(client, bucket_name, blob_name, local_path):
     print(f"Downloading gs://{bucket_name}/{blob_name}")
     blob.download_to_filename(local_path)
 
+
+def get_pyrome_gdf(pyrome_ids):
+    pyromes = ee.FeatureCollection(
+        "projects/pyregence-ee/assets/Pyromes_CONUS_20200206"
+    )
+    pyromes = pyromes.filter(ee.Filter.inList("PYROME", pyrome_ids))
+    data = pyromes.getInfo()
+    gdf = gpd.GeoDataFrame.from_features(data["features"])
+    gdf.set_crs("EPSG:4326", inplace=True)
+    return gdf
+
 def export_if_missing(
     *,
     image,
@@ -276,12 +287,30 @@ def main(args):
     if args.tilenums:
         tiles = tiles[tiles["tilenum"].isin(args.tilenums)]
 
+    pyrome_ids = None
+    if args.pyromes:
+        pyrome_ids = [int(pid) for pid in args.pyromes]
+        pyromes = get_pyrome_gdf(pyrome_ids)
+        if pyromes.crs != tiles.crs:
+            pyromes = pyromes.to_crs(tiles.crs)
+        pyrome_union = pyromes.unary_union
+        tiles = tiles[tiles.intersects(pyrome_union)]
+
     if tiles.empty:
         raise RuntimeError("No tiles selected after filtering")
 
     print(f"Processing {len(tiles)} tiles")
 
     to_fc = geemap.gdf_to_ee(tiles)
+
+    tile_pyrome_map = {}
+    if pyrome_ids:
+        for _, row in pyromes.iterrows():
+            pyrome_id = int(row["PYROME"])
+            geom = row.geometry
+            pyrome_tiles = tiles[tiles.intersects(geom)]["tilenum"].tolist()
+            for tilenum in pyrome_tiles:
+                tile_pyrome_map.setdefault(int(tilenum), set()).add(pyrome_id)
 
     for tile in to_fc.toList(to_fc.size()).getInfo():
         tilenum = tile["properties"]["tilenum"]
@@ -402,139 +431,156 @@ def main(args):
         .mean()
         )
 
-        tile_prefix = f"{tilenum}"
+        if tile_pyrome_map:
+            pyrome_prefixes = [
+                f"pyrome_{pid}/{tilenum}" for pid in sorted(tile_pyrome_map.get(int(tilenum), []))
+            ]
+        else:
+            pyrome_prefixes = [f"{args.year}/{tilenum}"]
 
-        # print(f"Band names for tilenum{tilenum}_aef_{args.year}: {embeddings.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=embeddings,
-        #     desc=f"tilenum{tilenum}_aef_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_aef_{args.year}: {embeddings.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=embeddings,
+                desc=f"tilenum{tilenum}_aef_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_fm40label_{args.year}: {fbfm40.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=fbfm40,
-        #     desc=f"tilenum{tilenum}_fm40label_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_fm40label_{args.year}: {fbfm40.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=fbfm40,
+                desc=f"tilenum{tilenum}_fm40label_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_fm40parentlabel_{args.year}: {parent.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=parent,
-        #     desc=f"tilenum{tilenum}_fm40parentlabel_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_fm40parentlabel_{args.year}: {parent.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=parent,
+                desc=f"tilenum{tilenum}_fm40parentlabel_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_ch_{args.year}: {ch.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=ch,
-        #     desc=f"tilenum{tilenum}_ch_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_ch_{args.year}: {ch.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=ch,
+                desc=f"tilenum{tilenum}_ch_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_cc_{args.year}: {cc.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=cc,
-        #     desc=f"tilenum{tilenum}_cc_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_cc_{args.year}: {cc.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=cc,
+                desc=f"tilenum{tilenum}_cc_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_cbh_{args.year}: {cbh.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=cbh,
-        #     desc=f"tilenum{tilenum}_cbh_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_cbh_{args.year}: {cbh.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=cbh,
+                desc=f"tilenum{tilenum}_cbh_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_cbd_{args.year}: {cbd.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=cbd,
-        #     desc=f"tilenum{tilenum}_cbd_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_cbd_{args.year}: {cbd.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=cbd,
+                desc=f"tilenum{tilenum}_cbd_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_elevation: {elevation.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=elevation,
-        #     desc=f"tilenum{tilenum}_elevation",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_elevation: {elevation.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=elevation,
+                desc=f"tilenum{tilenum}_elevation",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_slope: {slope.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=slope,
-        #     desc=f"tilenum{tilenum}_slope",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_slope: {slope.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=slope,
+                desc=f"tilenum{tilenum}_slope",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_aspect: {aspect.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=aspect,
-        #     desc=f"tilenum{tilenum}_aspect",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_aspect: {aspect.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=aspect,
+                desc=f"tilenum{tilenum}_aspect",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_mtpi: {mtpi.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=mtpi,
-        #     desc=f"tilenum{tilenum}_mtpi",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_mtpi: {mtpi.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=mtpi,
+                desc=f"tilenum{tilenum}_mtpi",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
         print(f"Band names for tilenum{tilenum}_annual_hls_bands: {annual_hls_bands.bandNames().getInfo()}")
-        export_if_missing(
-            image=annual_hls_bands,
-            desc=f"tilenum{tilenum}_spectral_stats_{args.year}",
-            bucket=gcs_bucket,
-            region=region,
-            scale=args.scale,
-            crs=args.crs,
-            prefix=tile_prefix,
-        )
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=annual_hls_bands,
+                desc=f"tilenum{tilenum}_spectral_stats_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
         # print(f"Band names for tilenum{tilenum}_monthly_hls_indices: {monthly_hls_indices.bandNames().getInfo()}")
         # export_if_missing(
@@ -548,81 +594,88 @@ def main(args):
         # )
 
         print(f"Band names for tilenum{tilenum}_seasonal_hls_bands: {seasonal_hls_bands.bandNames().getInfo()}")
-        export_if_missing(
-            image=seasonal_hls_bands,
-            desc=f"tilenum{tilenum}_hls_band_stats_{args.year}",
-            bucket=gcs_bucket,
-            region=region,
-            scale=args.scale,
-            crs=args.crs,
-            prefix=tile_prefix,
-        )
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=seasonal_hls_bands,
+                desc=f"tilenum{tilenum}_hls_band_stats_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_climatenormals: {climatenormals.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=climatenormals,
-        #     desc=f"tilenum{tilenum}_climatenormals_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_climatenormals: {climatenormals.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=climatenormals,
+                desc=f"tilenum{tilenum}_climatenormals_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_prism: {prism.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=prism,
-        #     desc=f"tilenum{tilenum}_prism_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_prism: {prism.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=prism,
+                desc=f"tilenum{tilenum}_prism_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_evc: {evc.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=evc,
-        #     desc=f"tilenum{tilenum}_evc_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_evc: {evc.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=evc,
+                desc=f"tilenum{tilenum}_evc_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_evt: {evt.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=evt,
-        #     desc=f"tilenum{tilenum}_evt_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_evt: {evt.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=evt,
+                desc=f"tilenum{tilenum}_evt_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_evh: {evh.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=evh,
-        #     desc=f"tilenum{tilenum}_evh_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_evh: {evh.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=evh,
+                desc=f"tilenum{tilenum}_evh_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
-        # print(f"Band names for tilenum{tilenum}_bps: {bps.bandNames().getInfo()}")
-        # export_if_missing(
-        #     image=bps,
-        #     desc=f"tilenum{tilenum}_bps_{args.year}",
-        #     bucket=gcs_bucket,
-        #     region=region,
-        #     scale=args.scale,
-        #     crs=args.crs,
-        #     prefix=tile_prefix,
-        # )
+        print(f"Band names for tilenum{tilenum}_bps: {bps.bandNames().getInfo()}")
+        for prefix in pyrome_prefixes:
+            export_if_missing(
+                image=bps,
+                desc=f"tilenum{tilenum}_bps_{args.year}",
+                bucket=gcs_bucket,
+                region=region,
+                scale=args.scale,
+                crs=args.crs,
+                prefix=prefix,
+            )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -665,6 +718,11 @@ if __name__ == "__main__":
         "--tilenums",
         nargs="+",
         help="Optional list of tilenums to process (e.g. 01180 00371)",
+    )
+    parser.add_argument(
+        "--pyromes",
+        nargs="+",
+        help="Optional list of pyrome IDs to select intersecting tiles",
     )
 
     args = parser.parse_args()

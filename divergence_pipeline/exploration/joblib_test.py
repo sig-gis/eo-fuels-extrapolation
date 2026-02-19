@@ -1,7 +1,7 @@
 import joblib
 import sklearn
 
-file_name = r'C:\Users\edalt\RD_Fuels\eo-fuels-extrapolation\data\rf_zone_27.joblib'  # Replace with your file path
+file_name = r'C:\Users\edalt\RD_Fuels\eo-fuels-extrapolation\data\rf_pyrome_26.joblib'  # Replace with your file path
 loaded_object = joblib.load(file_name)
 
 print(loaded_object)
