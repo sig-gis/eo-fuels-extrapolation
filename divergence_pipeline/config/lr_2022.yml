@@ -1,0 +1,22 @@
+exp_name: LR
+model: 
+  name: LogisticRegression
+  params:
+    penalty: l2
+    c: 1.0
+    max_iter: 1000
+data:
+  evc: 
+    data_dict: D:\SIG\fuels\eo-fuels-extrapolation\data\LF2022_EVC_CONUS\CSV_DATA\LF2022_EVC_CONUS.csv
+    raster:  D:\SIG\fuels\eo-fuels-extrapolation\data\LF2022_EVC_CONUS\Tif\LF2023_EVC_CONUS.tif
+  evh: 
+    data_dict: D:\SIG\fuels\eo-fuels-extrapolation\data\LF2022_EVH_CONUS\CSV_DATA\LF2022_EVH_CONUS.csv
+    raster:  D:\SIG\fuels\eo-fuels-extrapolation\data\LF2022_EVH_CONUS\Tif\LF2023_EVH_CONUS.tif
+  evt: 
+    data_dict: D:\SIG\fuels\eo-fuels-extrapolation\data\LF2022_EVT_CONUS\CSV_DATA\LF2022_EVT_CONUS.csv
+    raster:  D:\SIG\fuels\eo-fuels-extrapolation\data\LF2022_EVT_CONUS\Tif\LF2023_EVT_CONUS.tif
+  bps: 
+    data_dict: D:\SIG\fuels\eo-fuels-extrapolation\data\LF2020_BPS_220_CONUS\CSV_DATA\LF20_BPS_220.csv
+    raster:  D:\SIG\fuels\eo-fuels-extrapolation\data\LF2022_EVC_CONUS\Tif\LC20_BPS_220.tif
+  nlcd:
+    raster: D:\SIG\fuels\eo-fuels-extrapolation\data\Annual_NLCD_LndCov_2023_CU_C1V1\Annual_NLCD_LndCov_2023_CU_C1V1.tif

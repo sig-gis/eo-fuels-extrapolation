@@ -1,15 +1,24 @@
 import argparse
+import joblib
 from pathlib import Path
+
+import json
+from yaml import load,dump
 
 import numpy as np
 import pandas as pd
+import geopandas as gpd
+
 from google.cloud import storage
+
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-import joblib
 
+import rasterio as rio
 
 FROM_VALS = [
     91, 92, 93, 98, 99,
@@ -103,18 +112,127 @@ def parse_args():
         help="Test split ratio.",
     )
     parser.add_argument(
-        "--n-estimators",
-        type=int,
-        default=500,
-        help="RandomForest number of estimators.",
-    )
-    parser.add_argument(
         "--output-dir",
         default="data",
         help="Directory to write trained model files.",
     )
+    parser.add_argument(
+        '--config',
+        type=str,
+        default='./config/lr.yml',
+        help='yml file cointaining model params & configurations'
+    )
+
     return parser.parse_args()
 
+def load_config(yml_path):
+    with open(yml_path) as f:
+        config = load(f)
+    return config
+
+def build_model(config):
+    model_params = config['params']
+    if config['name'] == 'RandomForest':
+        model = RandomForestClassifier(**model_params)
+    elif config['name'] == 'LogisticRegression':
+        model = LogisticRegression(**model_params)
+    elif config['name'] == 'KNeighborsClassifier':
+        model = KNeighborsClassifier(**model_params)
+
+    return model 
+
+def load_support_rasters(data_config):
+    evt_data_desc = pd.read_csv(data_config['evt']['data_dict'])
+    evc_data_desc = pd.read_csv(data_config['evc']['data_dict']).rename(columns={'CLASSNAMES':'EVC_CLASS'})
+    evh_data_desc = pd.read_csv(data_config['evh']['data_dict']).rename(columns={'CLASSNAMES':'EVH_CLASS'})
+    bps_data_desc = pd.read_csv(data_config['bps']['data_dict']).rename(columns={'GROUPVEG':'BPS_CLASS'})
+
+    evt_raster = rio.open(data_config['evt']['raster'])
+    evc_raster = rio.open(data_config['evc']['raster'])
+    evh_raster = rio.open(data_config['evh']['raster'])
+    bps_raster = rio.open(data_config['bps']['raster'])
+    nlcd_raster = rio.open(data_config['nlcd']['raster'])
+
+    support_rasters = {
+        'evc':{'data_dict':evc_data_desc,'raster':evc_raster},
+        'evt':{'data_dict':evt_data_desc,'raster':evt_raster},
+        'evh':{'data_dict':evh_data_desc,'raster':evh_raster},
+        'bps':{'data_dict':bps_data_desc,'raster':bps_raster},
+        'nlcd':{'raster':nlcd_raster}
+    }
+
+    return support_rasters
+
+def append_locations(df):
+    fuels_sample_loc = df.copy()
+
+    geo = df['.geo']
+    fuels_sample_loc['longitude'], fuels_sample_loc['latitude'] = geo.map(lambda x: list(json.loads(x)['coordinates'])[0]), geo.map(lambda x: list(json.loads(x)['coordinates'])[1])
+
+    fuels_sample_loc[['latitude','longitude']]
+    fuels_sample_loc.drop(columns=['system:index','.geo'],inplace=True)
+
+    fuels_sample_gdf = gpd.GeoDataFrame(fuels_sample_loc,geometry=gpd.points_from_xy(fuels_sample_loc.longitude,fuels_sample_loc.latitude),crs='EPSG:4326').to_crs('EPSG:5070')
+
+    return fuels_sample_gdf
+
+def append_veg_features(gdf,support_rasters):
+    def assign_tree_cover(record):
+        if (record['evc'] > 100) and (record['evc'] < 200):
+            tree_cover = (record['evc'] % 100) / 100.0
+        else:
+            tree_cover = 0
+        return tree_cover
+    def assign_shrub_cover(record):
+        if (record['evc'] > 200) and (record['evc'] < 300):
+                shrub_cover = (record['evc'] % 100) / 100.0
+        else:
+            shrub_cover = 0
+        return shrub_cover
+    def assign_herb_cover(record):
+        if (record['evc'] > 300) and (record['evc'] < 400):
+                herb_cover = (record['evc'] % 100) / 100.0
+        else:
+            herb_cover = 0
+        return herb_cover
+    def assign_tree_height(record):
+        if (record['evh'] > 100) and (record['evh'] < 200):
+            tree_height = (record['evh'] % 100)
+        else:
+            tree_height = 0
+        return tree_height
+    def assign_shrub_height(record):
+        if (record['evh'] > 200) and (record['evh'] < 300):
+                shrub_height = (record['evh'] % 100) / 10.0
+        else:
+            shrub_height = 0
+        return shrub_height
+    def assign_herb_height(record):
+        if (record['evh'] > 300) and (record['evh'] < 400):
+                herb_height = (record['evh'] % 100) / 10.0
+        else:
+            herb_height = 0
+        return herb_height
+    
+    coord_list = [(x,y) for x,y in zip(gdf['geometry'].x,gdf['geometry'].y)]
+    for key in support_rasters.keys():
+        gdf[key] = [x[0] for x in support_rasters[key]['raster'].sample(coord_list)]
+
+    gdf = gdf.merge(support_rasters['data_dict'][['LFRDB','EVT_NAME','EVT_ORDER','EVT_CLASS','EVT_SBCLS']],left_on='evt',right_on='LFRDB')
+    gdf = gdf.merge(support_rasters['data_dict'][['VALUE','EVC_CLASS']],left_on='evc',right_on='VALUE')
+    gdf = gdf.merge(support_rasters['data_dict'][['VALUE','EVH_CLASS']],left_on='evh',right_on='VALUE')
+    gdf = gdf.merge(support_rasters['data_dict'][['VALUE','BPS_NAME','BPS_CLASS']],left_on='bps',right_on='VALUE')
+
+    gdf['tree_height'] = gdf.apply(assign_tree_height,axis=1)
+    gdf['shrub_height'] = gdf.apply(assign_shrub_height,axis=1)
+    gdf['herb_height'] = gdf.apply(assign_herb_height,axis=1)
+
+    gdf['tree_cover'] = gdf.apply(assign_tree_cover,axis=1)
+    gdf['shrub_cover'] = gdf.apply(assign_shrub_cover,axis=1)
+    gdf['herb_cover'] = gdf.apply(assign_herb_cover,axis=1)
+
+
+    return gdf
 
 def pyrome_csv_filename(pyrome_id: int, year: int, mode: str) -> str:
     return f"pyrome_{pyrome_id}_{year}_{mode}_local_samples.csv"
@@ -230,6 +348,8 @@ def get_feature_list(df: pd.DataFrame):
     return train_features
 
 
+
+
 def remap_parent_labels(series: pd.Series) -> pd.Series:
     normalized = pd.to_numeric(series, errors="coerce").round().astype("Int64")
     mapping = dict(zip(FROM_VALS, TO_VALS))
@@ -308,7 +428,7 @@ def sample_random_labels(y_true: np.ndarray, rng: np.random.Generator) -> np.nda
     return rng.choice(values, size=len(y_true), replace=True, p=probabilities)
 
 
-def train_model(df, train_features, label, test_size, n_estimators, output_path):
+def train_model(df, train_features, label, test_size, model_config, output_path):
     X = np.nan_to_num(df[train_features].to_numpy(), 0)
     y = df[label].to_numpy().ravel()
 
@@ -320,18 +440,13 @@ def train_model(df, train_features, label, test_size, n_estimators, output_path)
     X_train_scaled = scaler.fit_transform(X_train)
     y_train_encode = y_train
 
-    rf = RandomForestClassifier(
-        n_estimators=n_estimators,
-        criterion="entropy",
-        max_features="sqrt",
-        n_jobs=-1,
-    )
+    clf = build_model(model_config)
 
-    rf.fit(X_train_scaled, y_train_encode)
-    rf.feature_names_in_ = np.array(train_features)
+    clf.fit(X_train_scaled, y_train_encode)
+    clf.feature_names_in_ = np.array(train_features)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(rf, output_path)
+    joblib.dump(clf, output_path)
     scaler_path = output_path.with_name(f"{output_path.stem}_scaler.joblib")
     joblib.dump(scaler, scaler_path)
     print(f"Saved {output_path}")
@@ -339,7 +454,7 @@ def train_model(df, train_features, label, test_size, n_estimators, output_path)
 
     X_test_scaled = scaler.transform(X_test)
     X_test_df = pd.DataFrame(X_test_scaled, columns=train_features)
-    y_pred = rf.predict(X_test_df)
+    y_pred = clf.predict(X_test_df)
     model_metrics = evaluate_metrics(y_test, y_pred, "model")
 
     rng = np.random.default_rng(SEED)
@@ -353,6 +468,9 @@ def train_model(df, train_features, label, test_size, n_estimators, output_path)
 
 def main():
     args = parse_args()
+
+    if args.config:
+        config = load_config(args.config)
 
     if not args.csv and not args.pyromes:
         raise ValueError("Provide --csv or --pyromes")
@@ -388,13 +506,13 @@ def main():
 
     if args.pyromes and not args.csv:
         if args.merge:
-            output_path = output_dir / "rf_pyromes_merged.joblib"
+            output_path = output_dir / f"{config['exp_name']}_pyromes_merged.joblib"
             metrics = train_model(
                 df,
                 train_features,
                 label=label_name,
                 test_size=args.test_size,
-                n_estimators=args.n_estimators,
+                config = config['model'],
                 output_path=output_path,
             )
             metrics_rows.append({"pyrome_id": "merged", **metrics})

@@ -66,6 +66,9 @@ def spectral_stat_names():
     indices = ["EVI", "MSAVI", "NBR", "NDMI", "NDVI", "SAVI", "TCB", "TCG", "TSW", "VARI"]
     return [f"{idx}_{stat}" for idx in indices for stat in stats]
 
+def lf_var_names():
+    lf_vars = ['EVT','BPS','tree_height','shrub_height','herb_height','tree_cover','shrub_cover','herb_cover']
+
 
 BAND_NAME_OVERRIDES = {
     "aef": lambda count: [f"aef_b{idx + 1}" for idx in range(count)],
