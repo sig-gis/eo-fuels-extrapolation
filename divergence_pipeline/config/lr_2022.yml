@@ -1,4 +1,5 @@
 exp_name: LR
+dataset_sampling: Uniform
 model: 
   name: LogisticRegression
   params:

@@ -12,7 +12,7 @@ import geopandas as gpd
 from google.cloud import storage
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -231,8 +231,7 @@ def append_veg_features(gdf,support_rasters):
     gdf['shrub_cover'] = gdf.apply(assign_shrub_cover,axis=1)
     gdf['herb_cover'] = gdf.apply(assign_herb_cover,axis=1)
 
-
-    return gdf
+    return gdf[['EVT_CLASS','BPS_CLASS','nlcd','tree_height','shrub_height','herb_height','tree_cover','shrub_cover','herb_cover']]
 
 def pyrome_csv_filename(pyrome_id: int, year: int, mode: str) -> str:
     return f"pyrome_{pyrome_id}_{year}_{mode}_local_samples.csv"
@@ -334,10 +333,14 @@ def get_feature_list(df: pd.DataFrame):
         feature_list.remove(col)
 
     alphaearth_features = [f"A{str(i).zfill(2)}" for i in range(64)]
+
     if not all(feature in feature_list for feature in alphaearth_features):
         aef_features = [f"aef_b{idx + 1}" for idx in range(64)]
         if all(feature in feature_list for feature in aef_features):
             alphaearth_features = aef_features
+
+    categorical_features = ['BPS_CLASS','EVT_CLASS','nlcd']
+
     label_list = ["FBFM40", "FBFM40Parent"]
     feature_list_wo_alphaearth = [
         feature for feature in feature_list
@@ -345,7 +348,8 @@ def get_feature_list(df: pd.DataFrame):
     ]
     train_features = alphaearth_features + feature_list_wo_alphaearth
     train_features = [f for f in train_features if f not in ["ESP"]]
-    return train_features
+    continuous_features = [train_features for feature in train_features if feature not in categorical_features]
+    return train_features,categorical_features,continuous_features
 
 
 
@@ -428,17 +432,40 @@ def sample_random_labels(y_true: np.ndarray, rng: np.random.Generator) -> np.nda
     return rng.choice(values, size=len(y_true), replace=True, p=probabilities)
 
 
-def train_model(df, train_features, label, test_size, model_config, output_path):
-    X = np.nan_to_num(df[train_features].to_numpy(), 0)
-    y = df[label].to_numpy().ravel()
+def train_model(df, train_features, categorical_features,continuous_features, label, test_size, model_config, output_path):
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=SEED
-    )
+    df[continuous_features] = df[continuous_features].fillna(0)
 
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    y_train_encode = y_train
+    # X = np.nan_to_num(df[train_features].to_numpy(), 0)
+    # y = df[label].to_numpy().ravel()
+
+    df_train = df.sample(frac=(1-test_size),replace=False)
+    df_test = df.drop(df_train.index)
+
+    X_train_continuous = df_train[continuous_features]
+    X_train_categorical = df_train[categorical_features]
+    y_train = df_train[label]
+
+    X_test_continuous = df_test[continuous_features]
+    X_test_categorical = df_test[categorical_features]
+    y_test = df_test[label]
+
+    # X_train, X_test, y_train, y_test = train_test_split(
+    #     X, y, test_size=test_size, random_state=SEED
+    # )
+
+    # scaler = StandardScaler()
+
+    cont_scaler = StandardScaler()
+    cat_scaler = OneHotEncoder(handle_unknown='ignore')
+    label_encoder = LabelEncoder()
+    label_encoder.fit(FROM_VALS)
+
+    X_train_continuous_scaled = cont_scaler.fit_transform(X_train_continuous)
+    X_train_categorical_scaled = cat_scaler.fit_transform(X_train_categorical)
+    X_train_scaled = np.concatenate([X_train_continuous_scaled,X_train_categorical_scaled],axis=1)
+
+    y_train_encode = label_encoder.transform(y_train)
 
     clf = build_model(model_config)
 
@@ -446,16 +473,32 @@ def train_model(df, train_features, label, test_size, model_config, output_path)
     clf.feature_names_in_ = np.array(train_features)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    
     joblib.dump(clf, output_path)
-    scaler_path = output_path.with_name(f"{output_path.stem}_scaler.joblib")
-    joblib.dump(scaler, scaler_path)
-    print(f"Saved {output_path}")
-    print(f"Saved {scaler_path}")
 
-    X_test_scaled = scaler.transform(X_test)
+    cont_scaler_path = output_path.with_name(f"{output_path.stem}_cont_scaler.joblib")
+    joblib.dump(cont_scaler, cont_scaler_path)
+
+    cat_scaler_path = output_path.with_name(f"{output_path.stem}_cat_scaler.joblib")
+    joblib.dump(cat_scaler, cat_scaler_path)
+
+    label_encoder_path = output_path.with_name(f'{output_path.stem}_label_encoder.joblib')
+    joblib.dump(label_encoder_path,label_encoder)
+
+
+    print(f"Saved {output_path}")
+    print(f"Saved {cat_scaler_path}")
+    print(f"Saved {cont_scaler_path}")
+
+    X_test_continuous_scaled = cont_scaler.transform(X_test_continuous)
+    X_test_categorical_scaled = cat_scaler.transform(X_test_categorical)
+    X_test_scaled = np.concatenate([X_test_continuous_scaled,X_test_categorical_scaled],axis=1)
+
+    y_test_encode = label_encoder.transform(y_test)
+
     X_test_df = pd.DataFrame(X_test_scaled, columns=train_features)
     y_pred = clf.predict(X_test_df)
-    model_metrics = evaluate_metrics(y_test, y_pred, "model")
+    model_metrics = evaluate_metrics(y_test_encode, y_pred, "model")
 
     rng = np.random.default_rng(SEED)
     random_preds = sample_random_labels(y_test, rng)
@@ -471,6 +514,8 @@ def main():
 
     if args.config:
         config = load_config(args.config)
+
+    exp_name = config['name']
 
     if not args.csv and not args.pyromes:
         raise ValueError("Provide --csv or --pyromes")
@@ -498,7 +543,13 @@ def main():
 
     label_name = resolve_label_column(df, args.label)
 
-    train_features = get_feature_list(df)
+    train_features, categorical_features, continuous_features = get_feature_list(df)
+
+    support_rasters = load_support_rasters(config['data'])
+
+    df = append_locations(df)
+    df = append_veg_features(df,support_rasters)
+    
 
     output_dir = Path(args.output_dir)
 
@@ -506,10 +557,12 @@ def main():
 
     if args.pyromes and not args.csv:
         if args.merge:
-            output_path = output_dir / f"{config['exp_name']}_pyromes_merged.joblib"
+            output_path = output_dir / f"{exp_name}_pyromes_merged.joblib"
             metrics = train_model(
                 df,
                 train_features,
+                categorical_features=categorical_features,
+                continuous_features=continuous_features,
                 label=label_name,
                 test_size=args.test_size,
                 config = config['model'],
@@ -523,18 +576,20 @@ def main():
                 zone_df = df if len(zones_to_train) == 1 else df[df["pyrome_id"] == zone]
                 if zone_df.empty:
                     raise RuntimeError(f"No data for pyrome {zone}")
-                output_path = output_dir / f"rf_pyrome_{zone}.joblib"
+                output_path = output_dir / f"{exp_name}_pyrome_{zone}.joblib"
                 metrics = train_model(
                     zone_df,
                     train_features,
+                    categorical_features=categorical_features,
+                    continuous_features=continuous_features,
                     label=label_name,
                     test_size=args.test_size,
-                    n_estimators=args.n_estimators,
+                    config=config['model'],
                     output_path=output_path,
                 )
                 metrics_rows.append({"pyrome_id": zone, **metrics})
     else:
-        output_path = output_dir / "rf_model.joblib"
+        output_path = output_dir / f"{exp_name}_model.joblib"
         metrics = train_model(
             df,
             train_features,
@@ -546,7 +601,7 @@ def main():
         metrics_rows.append({"pyrome_id": "all", **metrics})
 
     metrics_df = pd.DataFrame(metrics_rows)
-    metrics_out = output_dir / "rf_training_accuracy_baseline.csv"
+    metrics_out = output_dir / f"{exp_name}_training_accuracy_baseline.csv"
     metrics_df.to_csv(metrics_out, index=False)
     print(f"Saved training metrics to {metrics_out}")
 
