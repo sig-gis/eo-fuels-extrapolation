@@ -1,10 +1,11 @@
-exp_name: LR
+exp_name: LR_L1
 dataset_sampling: Uniform
 model: 
   name: LogisticRegression
   params:
-    l1_ratio: 0
+    l1_ratio: 1
     C: 1.0
+    solver: saga
     max_iter: 1000
 data:
   evc: 
@@ -90,5 +91,10 @@ categorical_bands:
   - nlcd
   
 target:
-  drop_labels: []
+  drop_labels: 
+    - 91
+    - 92
+    - 93
+    - 98
+    - 99
   label: fbfm40

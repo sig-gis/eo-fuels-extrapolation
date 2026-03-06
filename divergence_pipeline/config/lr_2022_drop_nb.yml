@@ -90,5 +90,10 @@ categorical_bands:
   - nlcd
   
 target:
-  drop_labels: []
+  drop_labels: 
+    - 91
+    - 92
+    - 93
+    - 98
+    - 99
   label: fbfm40

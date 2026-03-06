@@ -60,7 +60,7 @@ def download_gpkg_if_needed(client, local_path):
     if os.path.exists(local_path):
         return
 
-    bucket = client.bucket(GPKG_BUCKET)
+    bucket = client.bucket(GPKG_BUCKET,user_project='pyregence-ee')
     blob = bucket.blob(GPKG_BLOB)
 
     if not blob.exists():
@@ -111,6 +111,8 @@ def download_tile_layers(bucket, year, tilenum, pyrome_id, output_dir):
         if not local_path.exists():
             print(f"Downloading gs://{bucket.name}/{blob_name}")
             blob.download_to_filename(local_path)
+        else:
+            print(f"Local path already present {local_path}")
         layer_paths.setdefault(layer_name, []).append(local_path)
     return layer_paths
 
@@ -215,7 +217,7 @@ def compute_class_points(counts, points_per_class, mode):
             for cls in class_values
         }
     else:
-        class_points = {cls: points_per_class for cls in class_values}
+        class_points = {cls: min(int(0.5*counts[cls]), points_per_class) for cls in class_values}
     return class_points
 
 
@@ -249,11 +251,28 @@ def stratified_sample(label_dataset, geom, mode, points_per_class, seed):
         unique, cts = np.unique(vals, return_counts=True)
         for val, count in zip(unique, cts):
             counts[int(val)] = counts.get(int(val), 0) + int(count)
+    
+
+    total_pixels = 0
+    for k,v in counts.items():
+        total_pixels = total_pixels + int(v)
+
+    print(f'Pryome Class Distribution | Total Pixels: {total_pixels:e}')
+    for k,v in counts.items():
+        print(f'CLASS: {int(k)} | POINTS: {int(v)} | PCT: {(int(v) / total_pixels):0.3f}')
 
     if not counts:
         return [], {}
 
     class_points = compute_class_points(counts, points_per_class, mode)
+    total_pixels = 0 
+    for k,v in class_points.items():
+        total_pixels = total_pixels + int(v)
+    print(f'Number of Sampled Points | Total Pixels: {total_pixels:e}')
+    for k,v in class_points.items():
+        print(f'CLASS: {int(k)} | POINTS: {int(v)}| PCT: {(int(v) / total_pixels):0.3f}')
+
+
     remaining = class_points.copy()
     samples = []
 
@@ -321,6 +340,7 @@ def main():
         default="FBFM40",
         help="Label to sample (FBFM40 uses original values; FBFM40Parent uses parent classes).",
     )
+    parser.add_argument('--drop_labels')
     parser.add_argument("--points-per-class", type=int, default=3000)
     parser.add_argument("--seed", type=int, default=333)
     parser.add_argument(
@@ -341,16 +361,25 @@ def main():
             "(skip re-downloading tiles)."
         ),
     )
+    # parser.add_argument(
+    #     '--drop_classes',
+    #     nargs='+',
+    #     help='Classes in source tile to ignore for sampling'
+    # )
     parser.add_argument(
         "--gpkg-path",
         default=r"C:\Users\edalt\RD_Fuels\eo-fuels-extrapolation\temp\tiles48km_polygons_firefactor.gpkg",
         help="Local path to tiles GPKG",
     )
+    parser.add_argument(
+        '--suffix',
+        help='Suffix to append to the sampled dataset filename'
+    )
 
     args = parser.parse_args()
 
-    gcs_client = storage.Client()
-    bucket = gcs_client.bucket(args.bucket)
+    gcs_client = storage.Client(project='pyregence-ee')
+    bucket = gcs_client.bucket(args.bucket,user_project='pyregence-ee')
 
     download_gpkg_if_needed(gcs_client, args.gpkg_path)
     tiles = gpd.read_file(args.gpkg_path)
@@ -383,7 +412,7 @@ def main():
         all_layer_paths = {layer: [] for layer, _ in LAYER_SPECS}
 
         for tilenum in tilenums:
-            tile_dir = pyrome_temp / f"tile_{tilenum}"
+            tile_dir = pyrome_temp / f"{tilenum}"
             tile_layers = download_tile_layers(
                 bucket,
                 args.year,
@@ -447,7 +476,7 @@ def main():
         for name, values in predictor_data.items():
             df[name] = values
 
-        output_name = f"pyrome_{pyrome_id}_{args.year}_{args.mode}_local_samples.csv"
+        output_name = f"pyrome_{pyrome_id}_{args.year}_{args.mode}_local_samples_{args.suffix}.csv"
         output_path = pyrome_temp / output_name
         df.to_csv(output_path, index=False)
 

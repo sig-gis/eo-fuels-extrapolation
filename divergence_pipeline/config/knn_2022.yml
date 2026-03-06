@@ -1,11 +1,12 @@
-exp_name: LR
+exp_name: KNN
 dataset_sampling: Uniform
 model: 
-  name: LogisticRegression
+  name: KNeighborsClassifier
   params:
-    l1_ratio: 0
-    C: 1.0
-    max_iter: 1000
+    n_neighbors: 7
+    metric: cosine
+    weights: distance
+    n_jobs: -1
 data:
   evc: 
     data_dict: /home/rpdemilt/SIG/fuels/eo-fuels-extrapolation/data/LF2022_EVC_CONUS/CSV_Data/LF2022_EVC.csv

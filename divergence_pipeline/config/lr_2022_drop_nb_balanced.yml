@@ -1,8 +1,9 @@
-exp_name: LR
+exp_name: LR_balanced
 dataset_sampling: Uniform
 model: 
   name: LogisticRegression
   params:
+    class_weight: balanced
     l1_ratio: 0
     C: 1.0
     max_iter: 1000
@@ -90,5 +91,10 @@ categorical_bands:
   - nlcd
   
 target:
-  drop_labels: []
+  drop_labels: 
+    - 91
+    - 92
+    - 93
+    - 98
+    - 99
   label: fbfm40

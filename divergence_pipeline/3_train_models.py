@@ -3,7 +3,7 @@ import joblib
 from pathlib import Path
 
 import json
-from yaml import load,dump
+from yaml import load,dump,safe_load
 
 import numpy as np
 import pandas as pd
@@ -85,6 +85,11 @@ def parse_args():
         help="GCS prefix for pyrome CSVs (default: samples).",
     )
     parser.add_argument(
+        '--project',
+        default='pyregence-ee',
+        help='gcloud storage project for bucket location and billing'
+    )
+    parser.add_argument(
         "--combined-out",
         help="Optional output path to write merged CSV.",
     )
@@ -127,7 +132,7 @@ def parse_args():
 
 def load_config(yml_path):
     with open(yml_path) as f:
-        config = load(f)
+        config = safe_load(f)
     return config
 
 def build_model(config):
@@ -166,13 +171,7 @@ def load_support_rasters(data_config):
 def append_locations(df):
     fuels_sample_loc = df.copy()
 
-    geo = df['.geo']
-    fuels_sample_loc['longitude'], fuels_sample_loc['latitude'] = geo.map(lambda x: list(json.loads(x)['coordinates'])[0]), geo.map(lambda x: list(json.loads(x)['coordinates'])[1])
-
-    fuels_sample_loc[['latitude','longitude']]
-    fuels_sample_loc.drop(columns=['system:index','.geo'],inplace=True)
-
-    fuels_sample_gdf = gpd.GeoDataFrame(fuels_sample_loc,geometry=gpd.points_from_xy(fuels_sample_loc.longitude,fuels_sample_loc.latitude),crs='EPSG:4326').to_crs('EPSG:5070')
+    fuels_sample_gdf = gpd.GeoDataFrame(fuels_sample_loc,geometry=gpd.points_from_xy(fuels_sample_loc.x,fuels_sample_loc.y),crs='EPSG:5070')
 
     return fuels_sample_gdf
 
@@ -218,10 +217,10 @@ def append_veg_features(gdf,support_rasters):
     for key in support_rasters.keys():
         gdf[key] = [x[0] for x in support_rasters[key]['raster'].sample(coord_list)]
 
-    gdf = gdf.merge(support_rasters['data_dict'][['LFRDB','EVT_NAME','EVT_ORDER','EVT_CLASS','EVT_SBCLS']],left_on='evt',right_on='LFRDB')
-    gdf = gdf.merge(support_rasters['data_dict'][['VALUE','EVC_CLASS']],left_on='evc',right_on='VALUE')
-    gdf = gdf.merge(support_rasters['data_dict'][['VALUE','EVH_CLASS']],left_on='evh',right_on='VALUE')
-    gdf = gdf.merge(support_rasters['data_dict'][['VALUE','BPS_NAME','BPS_CLASS']],left_on='bps',right_on='VALUE')
+    gdf = gdf.merge(support_rasters['evt']['data_dict'][['VALUE','LFRDB','EVT_NAME','EVT_ORDER','EVT_CLASS','EVT_SBCLS']],left_on='evt',right_on='VALUE').drop(['VALUE'],axis=1)
+    gdf = gdf.merge(support_rasters['evc']['data_dict'][['VALUE','EVC_CLASS']],left_on='evc',right_on='VALUE').drop(['VALUE'],axis=1)
+    gdf = gdf.merge(support_rasters['evh']['data_dict'][['VALUE','EVH_CLASS']],left_on='evh',right_on='VALUE').drop(['VALUE'],axis=1)
+    gdf = gdf.merge(support_rasters['bps']['data_dict'][['VALUE','BPS_NAME','BPS_CLASS']],left_on='bps',right_on='VALUE').drop(['VALUE'],axis=1)
 
     gdf['tree_height'] = gdf.apply(assign_tree_height,axis=1)
     gdf['shrub_height'] = gdf.apply(assign_shrub_height,axis=1)
@@ -231,7 +230,11 @@ def append_veg_features(gdf,support_rasters):
     gdf['shrub_cover'] = gdf.apply(assign_shrub_cover,axis=1)
     gdf['herb_cover'] = gdf.apply(assign_herb_cover,axis=1)
 
-    return gdf[['EVT_CLASS','BPS_CLASS','nlcd','tree_height','shrub_height','herb_height','tree_cover','shrub_cover','herb_cover']]
+    gdf = gdf.drop(['evt','evc','evh','bps','LFRDB','EVT_NAME','EVT_ORDER','EVT_SBCLS','EVC_CLASS','EVH_CLASS','BPS_NAME'],axis=1)
+
+    out_df = pd.DataFrame(gdf.drop(columns='geometry'))
+
+    return out_df
 
 def pyrome_csv_filename(pyrome_id: int, year: int, mode: str) -> str:
     return f"pyrome_{pyrome_id}_{year}_{mode}_local_samples.csv"
@@ -249,6 +252,7 @@ def download_pyrome_csv(
     mode: str,
     bucket_name: str,
     gcs_prefix: str,
+    project:str,
 ) -> Path:
     local_path = pyrome_csv_path(samples_dir, pyrome_id, year, mode)
     if local_path.exists():
@@ -259,8 +263,8 @@ def download_pyrome_csv(
     gcs_filename = pyrome_csv_filename(pyrome_id, year, mode)
     blob_name = f"{gcs_prefix}/pyrome_{pyrome_id}/{gcs_filename}".lstrip("/")
 
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
+    client = storage.Client(project=project)
+    bucket = client.bucket(bucket_name,user_project=project)
     blob = bucket.blob(blob_name)
 
     if not blob.exists():
@@ -286,6 +290,7 @@ def merge_pyrome_csvs(
     samples_dir: Path,
     bucket_name: str,
     gcs_prefix: str,
+    project: str
 ) -> pd.DataFrame:
     frames = []
     missing = []
@@ -298,6 +303,7 @@ def merge_pyrome_csvs(
                 mode,
                 bucket_name,
                 gcs_prefix,
+                project
             )
         except FileNotFoundError:
             csv_path = pyrome_csv_path(samples_dir, pyrome_id, year, mode)
@@ -321,7 +327,8 @@ def merge_pyrome_csvs(
 
 def get_feature_list(df: pd.DataFrame):
     feature_list = df.columns.to_list()
-    for col in ["system:index", ".geo", "x", "y", "pyrome_id", "cc", "ch", "cbh", "cbd"]:
+    print(feature_list)
+    for col in ["system:index", ".geo", "x", "y", "pyrome_id", "cc", "ch", "cbh", "cbd",'cc_b1','ch_b1','cbh_b1','cbd_b1']:
         if col in feature_list:
             feature_list.remove(col)
 
@@ -348,11 +355,9 @@ def get_feature_list(df: pd.DataFrame):
     ]
     train_features = alphaearth_features + feature_list_wo_alphaearth
     train_features = [f for f in train_features if f not in ["ESP"]]
-    continuous_features = [train_features for feature in train_features if feature not in categorical_features]
+    continuous_features = [feature for feature in train_features if feature not in categorical_features]
+
     return train_features,categorical_features,continuous_features
-
-
-
 
 def remap_parent_labels(series: pd.Series) -> pd.Series:
     normalized = pd.to_numeric(series, errors="coerce").round().astype("Int64")
@@ -434,18 +439,24 @@ def sample_random_labels(y_true: np.ndarray, rng: np.random.Generator) -> np.nda
 
 def train_model(df, train_features, categorical_features,continuous_features, label, test_size, model_config, output_path):
 
+    print(continuous_features)
+    print(categorical_features)
+
     df[continuous_features] = df[continuous_features].fillna(0)
 
     # X = np.nan_to_num(df[train_features].to_numpy(), 0)
     # y = df[label].to_numpy().ravel()
 
+    # df_train = df.groupy(label,group_keys=False).apply(lambda x: x.sample(frac=(1-test_size)),replace=False)
     df_train = df.sample(frac=(1-test_size),replace=False)
     df_test = df.drop(df_train.index)
+
 
     X_train_continuous = df_train[continuous_features]
     X_train_categorical = df_train[categorical_features]
     y_train = df_train[label]
 
+    
     X_test_continuous = df_test[continuous_features]
     X_test_categorical = df_test[categorical_features]
     y_test = df_test[label]
@@ -456,21 +467,38 @@ def train_model(df, train_features, categorical_features,continuous_features, la
 
     # scaler = StandardScaler()
 
+    unique, values = np.unique(y_train,return_counts=True)
+    print('Training Set Classes')
+    for k, v in zip(list(unique),list(values)):
+        print(f'CLASS: {int(k)} | Count: {int(v)} | PCT: {int(v) / np.sum(values):0.3f}')
+    
+    unique, values = np.unique(y_test,return_counts=True)
+    print('Test Set Classes:')
+    for k, v in zip(list(unique),list(values)):
+        print(f'CLASS: {int(k)} | Count: {int(v)} | PCT: {int(v) / np.sum(values):0.3f}')
+
     cont_scaler = StandardScaler()
-    cat_scaler = OneHotEncoder(handle_unknown='ignore')
+    cat_scaler = OneHotEncoder(handle_unknown='ignore',sparse_output=False)
     label_encoder = LabelEncoder()
     label_encoder.fit(FROM_VALS)
 
     X_train_continuous_scaled = cont_scaler.fit_transform(X_train_continuous)
     X_train_categorical_scaled = cat_scaler.fit_transform(X_train_categorical)
-    X_train_scaled = np.concatenate([X_train_continuous_scaled,X_train_categorical_scaled],axis=1)
+
+    cont_scaler_features = cont_scaler.get_feature_names_out()
+    cat_scaler_features = cat_scaler.get_feature_names_out()
+    print(f'Cont Scaler Out Features: {cat_scaler_features}')
+
+    full_feature_list = np.concatenate([cont_scaler_features,cat_scaler_features])
+
+    X_train_scaled = pd.DataFrame(np.concatenate([X_train_continuous_scaled,X_train_categorical_scaled],axis=1),columns=full_feature_list)
 
     y_train_encode = label_encoder.transform(y_train)
 
     clf = build_model(model_config)
 
     clf.fit(X_train_scaled, y_train_encode)
-    clf.feature_names_in_ = np.array(train_features)
+    # clf.feature_names_in_ = np.array(train_features)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -483,7 +511,7 @@ def train_model(df, train_features, categorical_features,continuous_features, la
     joblib.dump(cat_scaler, cat_scaler_path)
 
     label_encoder_path = output_path.with_name(f'{output_path.stem}_label_encoder.joblib')
-    joblib.dump(label_encoder_path,label_encoder)
+    joblib.dump(label_encoder,label_encoder_path)
 
 
     print(f"Saved {output_path}")
@@ -492,12 +520,12 @@ def train_model(df, train_features, categorical_features,continuous_features, la
 
     X_test_continuous_scaled = cont_scaler.transform(X_test_continuous)
     X_test_categorical_scaled = cat_scaler.transform(X_test_categorical)
-    X_test_scaled = np.concatenate([X_test_continuous_scaled,X_test_categorical_scaled],axis=1)
+    X_test_scaled = pd.DataFrame(np.concatenate([X_test_continuous_scaled,X_test_categorical_scaled],axis=1),columns = full_feature_list)
 
     y_test_encode = label_encoder.transform(y_test)
 
-    X_test_df = pd.DataFrame(X_test_scaled, columns=train_features)
-    y_pred = clf.predict(X_test_df)
+    # X_test_df = pd.DataFrame(X_test_scaled, columns=train_features)
+    y_pred = clf.predict(X_test_scaled)
     model_metrics = evaluate_metrics(y_test_encode, y_pred, "model")
 
     rng = np.random.default_rng(SEED)
@@ -506,6 +534,8 @@ def train_model(df, train_features, categorical_features,continuous_features, la
 
     metrics = {**model_metrics, **baseline_metrics}
     metrics["num_samples"] = len(y_test)
+
+    print(f'Observed Model Classes: {label_encoder.inverse_transform(clf.classes_)}')
     return metrics
 
 
@@ -515,7 +545,7 @@ def main():
     if args.config:
         config = load_config(args.config)
 
-    exp_name = config['name']
+    exp_name = config['exp_name']
 
     if not args.csv and not args.pyromes:
         raise ValueError("Provide --csv or --pyromes")
@@ -533,6 +563,7 @@ def main():
             samples_dir,
             args.bucket,
             args.gcs_prefix,
+            args.project
         )
 
         if args.combined_out:
@@ -543,13 +574,17 @@ def main():
 
     label_name = resolve_label_column(df, args.label)
 
-    train_features, categorical_features, continuous_features = get_feature_list(df)
-
     support_rasters = load_support_rasters(config['data'])
+
+    df = df.drop(['evc_b1','evt_b1','evh_b1','bps_b1'],axis=1)
 
     df = append_locations(df)
     df = append_veg_features(df,support_rasters)
-    
+
+    if config['target']['drop_labels']:
+        df = df[~df[args.label].isin(config['target']['drop_labels'])]
+
+    train_features, categorical_features, continuous_features = get_feature_list(df)
 
     output_dir = Path(args.output_dir)
 
@@ -565,7 +600,7 @@ def main():
                 continuous_features=continuous_features,
                 label=label_name,
                 test_size=args.test_size,
-                config = config['model'],
+                model_config = config['model'],
                 output_path=output_path,
             )
             metrics_rows.append({"pyrome_id": "merged", **metrics})
@@ -584,7 +619,7 @@ def main():
                     continuous_features=continuous_features,
                     label=label_name,
                     test_size=args.test_size,
-                    config=config['model'],
+                    model_config=config['model'],
                     output_path=output_path,
                 )
                 metrics_rows.append({"pyrome_id": zone, **metrics})
