@@ -4,3 +4,7 @@
 /_archive/*
 /figs/*
 *.html
+divergence_pipeline/scripts/*
+divergence_pipeline/temp/*
+divergence_pipeline/outputs/*
+divergence_pipeline/*.txt
