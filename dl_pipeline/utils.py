@@ -1,81 +1,120 @@
 import torch
 import torch.nn.functional as F
 
-from sklearn.metrics import accuracy_score,f1_score
+import numpy as np 
 
-def accuracy(preds,labels,valid_mask):
+from tqdm import tqdm
 
-    preds = torch.flatten(preds)[valid_mask.flatten()]
-    labels = torch.flatten(labels)[valid_mask.flatten()]
+from tabulate import tabulate
 
-    return torch.mean(preds==labels)
+def evaluate(test_dataloader,model,criterion,label_set,epoch_bar,epoch,device):
+    model.eval()
+
+    acc = 0
+    f1 = 0
+    miou = 0
+    iou = np.zeros(len(label_set))
+    eval_loss = 0
+    eval_dist = np.zeros(len(label_set))
+    per_class_f1 = np.zeros(len(label_set))
+    with torch.no_grad():
+        for batch in test_dataloader:
+            image = batch['image']['aef'].to(device)
+            target = batch['target'].to(device)
+
+            logit = model(image)
+
+            loss = criterion(logit,target)
+
+            metrics = compute_metrics(logit,target,label_set)
+
+            acc += metrics['acc']
+            f1 += metrics['f1macro']
+            miou += metrics['miou']
+            iou += metrics['iou']
+            per_class_f1 += metrics['per_class_f1s']
+            eval_dist += metrics['dist']
+            eval_loss += loss
+        
+        acc /= len(test_dataloader)
+        f1 /= len(test_dataloader)
+        miou /= len(test_dataloader)
+        eval_dist /= len(test_dataloader)
+        eval_loss /= len(test_dataloader)
+        iou /= len(test_dataloader)
+        per_class_f1 /= len(test_dataloader)
+
+        print(f'=== Epoch {epoch} metrics ===')
+        print(tabulate(zip(label_set,list(iou),list(per_class_f1),list(eval_dist)),headers=['Class','mIoU','f1','Class Dist'],tablefmt='pipe',floatfmt='0.5f'))
+        print('==============================')
+
+        epoch_bar.set_postfix(eval_loss=loss.item(),acc=acc,f1=f1,miou=miou)
+    
+    model.train()
+
+def accuracy(confusion_matrix):
+
+    return torch.sum(torch.diag(confusion_matrix)) / torch.sum(confusion_matrix)
 
 def weighted_accuracy(preds,labels,class_weights):
 
     return
 
-def f1score(preds,labels,valid_mask,classes):
-    num_classes = len(classes)
-    preds = torch.flatten(preds)[valid_mask.flatten()]
-    labels = torch.flatten(labels)[valid_mask.flatten()]
-
-    label_vals, label_counts = torch.unique(labels,return_counts=True)
-    label_support = label_counts / labels.size()
-
-    preds_one_hot = F.one_hot(preds,num_classes=num_classes)
-    labels_one_hot = F.one_hot(labels,num_classes=num_classes)
-
-    #macro f1
-    tp = torch.mean(preds_one_hot & labels_one_hot,dim=0)
-    fp = torch.mean(preds_one_hot & ~labels_one_hot,dim=0)
-    fn = torch.mean(~preds_one_hot & labels_one_hot,dim=0)
-
-    f1_macro = torch.mean((2*tp) / ((2*tp) + fp + fn))
-
-    f1_weighted = torch.mean(((2*tp) / ((2*tp) + fp + fn)) * label_support)
-
-    #micro f1
-    tp = torch.mean(preds_one_hot & labels_one_hot)
-    fp = torch.mean(preds_one_hot & ~labels_one_hot)
-    fn = torch.mean(~preds_one_hot & labels_one_hot)
-
-    f1_micro = (2*tp) / ((2*tp) + fp + fn)
+def f1score(confusion_matrix):
     
-    return f1_micro, f1_macro, f1_weighted
+    tp = torch.diag(confusion_matrix)
+    
+    precision = tp / (torch.sum(confusion_matrix,dim=0) + 1e-6)
+    recall = tp / (torch.sum(confusion_matrix,dim=1) + 1e-6)
+
+    f1 = (2 * (precision * recall)) / (precision + recall + 1e-6)
+
+    weighted_f1 = f1 * (torch.sum(confusion_matrix,dim=0) / (torch.sum(confusion_matrix)))
+    f1_macro = torch.mean(f1)
+    f1_macro_weighted = torch.mean(weighted_f1)
+
+    return f1_macro, f1_macro_weighted, f1
 
 def miou_score(confusion_matrix):
     intersection = torch.diag(confusion_matrix)
     union = confusion_matrix.sum(dim=1) + confusion_matrix.sum(dim=0) - intersection
-    iou = (intersection / (union + 1e-6)) * 100
+    iou = ((intersection) / (union + 1e-6))
 
+    class_dist = torch.sum(confusion_matrix,dim=0) / torch.sum(confusion_matrix)
+
+    wiou = torch.sum(iou*class_dist)
+    
     miou = torch.mean(iou)
-    return miou
+    return miou, iou, wiou
 
-def dice(pred,label):
-    return
-
-def compute_metrics(out,label,classes):
-    predictions = torch.argmax(out,dim=1).squeeze(dim=1)
+def compute_metrics(logits,label,classes):
+    probs = torch.exp(F.log_softmax(logits,dim=1))
+    predictions = torch.argmax(probs,dim=1).squeeze(dim=1)
 
     valid_mask = (label != -1)
 
     num_classes = len(classes)
     preds,labels = predictions[valid_mask], label[valid_mask]
 
-    count = torch.bincount(preds*num_classes + labels)
+    count = torch.bincount(preds*num_classes + labels,minlength=num_classes**2)
 
     confusion_matrix = count.view(num_classes,num_classes)
 
-    acc = accuracy(predictions,label,valid_mask)
-    f1_micro, f1_macro, f1_weighted = f1score(predictions,label,valid_mask)
-    miou = miou_score(confusion_matrix)
+    class_dist = torch.sum(confusion_matrix,dim=0) / torch.sum(confusion_matrix)
+
+    acc = accuracy(confusion_matrix)
+    f1_macro, f1_macro_weighted, f1 = f1score(confusion_matrix)
+    miou, iou, wiou = miou_score(confusion_matrix)
 
     metrics = {
         'acc':acc.item(),
-        'f1micro':f1_micro.item(),
         'f1macro':f1_macro.item(),
-        'f1weighted':f1_weighted.item(),
-        'miou':miou.item()
+        'f1weighted':f1_macro_weighted.item(),
+        'per_class_f1s':f1.cpu().detach().numpy(),
+        'miou':miou.item(),
+        'wiou':wiou.item(),
+        'iou':iou.cpu().detach().numpy(),
+        'dist':class_dist.cpu().detach().numpy()
     }
 
     return metrics

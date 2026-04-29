@@ -724,6 +724,12 @@ if __name__ == "__main__":
         nargs="+",
         help="Optional list of pyrome IDs to select intersecting tiles",
     )
+    parser.add_argument(
+        '--targets',
+        nargs='+',
+        help='Optional list of target variables for downloading'
+
+    )
 
     args = parser.parse_args()
     main(args)
